@@ -415,18 +415,138 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
 
         // Determine bind address
         let bindAddress: SocketAddress
+        let isIPv6: Bool
         switch configuration.bindAddress {
         case .any(let port):
             bindAddress = try SocketAddress(ipAddress: "0.0.0.0", port: port)
+            isIPv6 = false
         case .specific(let host, let port):
             bindAddress = try SocketAddress(ipAddress: host, port: port)
+            isIPv6 = host.contains(":")
         case .ipv4Any(let port):
             bindAddress = try SocketAddress(ipAddress: "0.0.0.0", port: port)
+            isIPv6 = false
         case .ipv6Any(let port):
             bindAddress = try SocketAddress(ipAddress: "::", port: port)
+            isIPv6 = true
         }
 
-        return try await bootstrap.bind(to: bindAddress).get()
+        // Set multicast interface for outgoing packets
+        // This is required for multicast to work correctly
+        if !isIPv6 {
+            // IPv4: Enable IP_MULTICAST_LOOP and set multicast TTL
+            #if canImport(Darwin)
+            let multicastLoopOption = ChannelOptions.Types.SocketOption(
+                level: .init(rawValue: IPPROTO_IP),
+                name: .init(rawValue: IP_MULTICAST_LOOP)
+            )
+            bootstrap = bootstrap.channelOption(multicastLoopOption, value: CInt(1))
+
+            let multicastTTLOption = ChannelOptions.Types.SocketOption(
+                level: .init(rawValue: IPPROTO_IP),
+                name: .init(rawValue: IP_MULTICAST_TTL)
+            )
+            bootstrap = bootstrap.channelOption(multicastTTLOption, value: CInt(255))
+            #elseif os(Linux)
+            let multicastLoopOption = ChannelOptions.Types.SocketOption(
+                level: .init(rawValue: CInt(IPPROTO_IP)),
+                name: .init(rawValue: CInt(IP_MULTICAST_LOOP))
+            )
+            bootstrap = bootstrap.channelOption(multicastLoopOption, value: CInt(1))
+
+            let multicastTTLOption = ChannelOptions.Types.SocketOption(
+                level: .init(rawValue: CInt(IPPROTO_IP)),
+                name: .init(rawValue: CInt(IP_MULTICAST_TTL))
+            )
+            bootstrap = bootstrap.channelOption(multicastTTLOption, value: CInt(255))
+            #endif
+        } else {
+            // IPv6: Enable IPV6_MULTICAST_LOOP and set multicast hops
+            #if canImport(Darwin)
+            let multicastLoopOption = ChannelOptions.Types.SocketOption(
+                level: .init(rawValue: IPPROTO_IPV6),
+                name: .init(rawValue: IPV6_MULTICAST_LOOP)
+            )
+            bootstrap = bootstrap.channelOption(multicastLoopOption, value: CInt(1))
+
+            let multicastHopsOption = ChannelOptions.Types.SocketOption(
+                level: .init(rawValue: IPPROTO_IPV6),
+                name: .init(rawValue: IPV6_MULTICAST_HOPS)
+            )
+            bootstrap = bootstrap.channelOption(multicastHopsOption, value: CInt(255))
+            #elseif os(Linux)
+            let multicastLoopOption = ChannelOptions.Types.SocketOption(
+                level: .init(rawValue: CInt(IPPROTO_IPV6)),
+                name: .init(rawValue: CInt(IPV6_MULTICAST_LOOP))
+            )
+            bootstrap = bootstrap.channelOption(multicastLoopOption, value: CInt(1))
+
+            let multicastHopsOption = ChannelOptions.Types.SocketOption(
+                level: .init(rawValue: CInt(IPPROTO_IPV6)),
+                name: .init(rawValue: CInt(IPV6_MULTICAST_HOPS))
+            )
+            bootstrap = bootstrap.channelOption(multicastHopsOption, value: CInt(255))
+            #endif
+        }
+
+        let channel = try await bootstrap.bind(to: bindAddress).get()
+
+        // Set IP_MULTICAST_IF after binding (required for multicast send to work on macOS)
+        // Only set for multicast mode (reusePort == true) to avoid interfering with unicast
+        // Use NIO's SocketOptionProvider.unsafeSetSocketOption to set in_addr structure
+        if !isIPv6, configuration.reusePort, let socketChannel = channel as? SocketOptionProvider {
+            do {
+                let interfaceAddr = try getDefaultInterfaceAddress()
+                try await socketChannel.unsafeSetSocketOption(
+                    level: NIOBSDSocket.OptionLevel(rawValue: CInt(IPPROTO_IP)),
+                    name: NIOBSDSocket.Option(rawValue: CInt(IP_MULTICAST_IF)),
+                    value: interfaceAddr
+                ).get()
+            } catch {
+                // Log but don't fail - multicast may still work on some systems
+                #if DEBUG
+                print("Warning: Failed to set IP_MULTICAST_IF: \(error)")
+                #endif
+            }
+        }
+
+        return channel
+    }
+
+    /// Gets the first non-loopback IPv4 address for multicast interface
+    private func getDefaultInterfaceAddress() throws -> in_addr {
+        #if canImport(Darwin)
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else {
+            return in_addr(s_addr: INADDR_ANY.bigEndian)
+        }
+
+        defer { freeifaddrs(ifaddr) }
+
+        var ptr = firstAddr
+        while true {
+            let interface = ptr.pointee
+            let family = interface.ifa_addr.pointee.sa_family
+
+            // Look for non-loopback IPv4 address
+            if family == UInt8(AF_INET) {
+                let name = String(cString: interface.ifa_name)
+                if name != "lo0" && (interface.ifa_flags & UInt32(IFF_UP)) != 0 {
+                    let addr = interface.ifa_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                        $0.pointee.sin_addr
+                    }
+                    return addr
+                }
+            }
+
+            guard let next = interface.ifa_next else { break }
+            ptr = next
+        }
+
+        return in_addr(s_addr: INADDR_ANY.bigEndian)
+        #else
+        return in_addr(s_addr: in_addr_t(INADDR_ANY).bigEndian)
+        #endif
     }
 
     /// Gets a network device by name, using cache.
