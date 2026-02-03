@@ -356,6 +356,144 @@ struct BenchmarkTests {
         print("UDPConfiguration creation: \(perIteration) per iteration (\(iterations) iterations)")
         print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) ops/sec")
     }
+
+    // MARK: - Batch Send Benchmarks
+
+    @Test("Benchmark: Batch send throughput (10 packets)")
+    func benchmarkBatchSend10() async throws {
+        let config = UDPConfiguration(
+            bindAddress: .specific(host: "127.0.0.1", port: 0),
+            reuseAddress: true
+        )
+        let transport = NIOUDPTransport(configuration: config)
+
+        try await transport.start()
+
+        guard let localAddr = await transport.localAddress,
+              let port = localAddr.port else {
+            throw UDPError.notStarted
+        }
+
+        let targetAddr = try SocketAddress(ipAddress: "127.0.0.1", port: port)
+        let testData = Data(repeating: 0x42, count: 256)
+
+        // Prepare batch of 10 datagrams
+        let batchSize = 10
+        var datagrams: [(Data, SocketAddress)] = []
+        datagrams.reserveCapacity(batchSize)
+        for _ in 0..<batchSize {
+            datagrams.append((testData, targetAddr))
+        }
+
+        // Warm up
+        for _ in 0..<10 {
+            try await transport.sendBatch(datagrams)
+        }
+
+        let iterations = 1_000
+        let start = ContinuousClock.now
+
+        for _ in 0..<iterations {
+            try await transport.sendBatch(datagrams)
+        }
+
+        let elapsed = ContinuousClock.now - start
+        let totalDatagrams = iterations * batchSize
+        let perBatch = elapsed / iterations
+        let throughputMBps = (Double(totalDatagrams) * 256.0) / elapsed.totalSeconds / 1_000_000.0
+
+        await transport.stop()
+
+        print("Batch send (10x256 bytes): \(perBatch) per batch (\(iterations) batches)")
+        print("  Throughput: \(Double(totalDatagrams) / elapsed.totalSeconds) datagrams/sec")
+        print("  Data throughput: \(String(format: "%.2f", throughputMBps)) MB/sec")
+    }
+
+    @Test("Benchmark: Batch send vs single send (comparison)")
+    func benchmarkBatchVsSingle() async throws {
+        let config = UDPConfiguration(
+            bindAddress: .specific(host: "127.0.0.1", port: 0),
+            reuseAddress: true
+        )
+        let transport = NIOUDPTransport(configuration: config)
+
+        try await transport.start()
+
+        guard let localAddr = await transport.localAddress,
+              let port = localAddr.port else {
+            throw UDPError.notStarted
+        }
+
+        let targetAddr = try SocketAddress(ipAddress: "127.0.0.1", port: port)
+        let testData = Data(repeating: 0x42, count: 256)
+
+        let batchSize = 10
+        let iterations = 500
+
+        // Benchmark single send
+        let startSingle = ContinuousClock.now
+        for _ in 0..<iterations {
+            for _ in 0..<batchSize {
+                try await transport.send(testData, to: targetAddr)
+            }
+        }
+        let elapsedSingle = ContinuousClock.now - startSingle
+
+        // Benchmark batch send
+        var datagrams: [(Data, SocketAddress)] = []
+        datagrams.reserveCapacity(batchSize)
+        for _ in 0..<batchSize {
+            datagrams.append((testData, targetAddr))
+        }
+
+        let startBatch = ContinuousClock.now
+        for _ in 0..<iterations {
+            try await transport.sendBatch(datagrams)
+        }
+        let elapsedBatch = ContinuousClock.now - startBatch
+
+        await transport.stop()
+
+        let totalDatagrams = iterations * batchSize
+        let singleMBps = (Double(totalDatagrams) * 256.0) / elapsedSingle.totalSeconds / 1_000_000.0
+        let batchMBps = (Double(totalDatagrams) * 256.0) / elapsedBatch.totalSeconds / 1_000_000.0
+
+        print("Single send (10x256B): \(String(format: "%.2f", singleMBps)) MB/sec")
+        print("Batch send  (10x256B): \(String(format: "%.2f", batchMBps)) MB/sec")
+        print("Speedup: \(String(format: "%.2f", batchMBps / singleMBps))x")
+    }
+
+    @Test("Benchmark: SocketAddress.cached() performance")
+    func benchmarkAddressCache() throws {
+        let iterations = 100_000
+
+        // Benchmark uncached parsing
+        let startUncached = ContinuousClock.now
+        for _ in 0..<iterations {
+            _ = try SocketAddress(hostPort: "192.168.1.100:7946")
+        }
+        let elapsedUncached = ContinuousClock.now - startUncached
+
+        // Clear cache and prepare for cached benchmark
+        SocketAddress.clearCache()
+
+        // Pre-populate cache
+        _ = try SocketAddress.cached(hostPort: "192.168.1.100:7946")
+
+        // Benchmark cached access
+        let startCached = ContinuousClock.now
+        for _ in 0..<iterations {
+            _ = try SocketAddress.cached(hostPort: "192.168.1.100:7946")
+        }
+        let elapsedCached = ContinuousClock.now - startCached
+
+        let uncachedPerOp = elapsedUncached / iterations
+        let cachedPerOp = elapsedCached / iterations
+
+        print("SocketAddress uncached: \(uncachedPerOp) per operation")
+        print("SocketAddress cached:   \(cachedPerOp) per operation")
+        print("Speedup: \(String(format: "%.1f", elapsedUncached.totalSeconds / elapsedCached.totalSeconds))x")
+    }
 }
 
 // MARK: - Duration Helper

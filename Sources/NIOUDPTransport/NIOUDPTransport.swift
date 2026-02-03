@@ -260,6 +260,72 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
         try await sendBuffer(buffer, to: address, channel: channel)
     }
 
+    /// Sends multiple datagrams in a batch (optimized for throughput).
+    ///
+    /// Writes all datagrams without flushing, then flushes once at the end.
+    /// This reduces system call overhead and can dramatically improve throughput.
+    ///
+    /// - Parameters:
+    ///   - datagrams: Array of (buffer, address) tuples to send
+    /// - Throws: `UDPError` if any datagram is too large or transport is not started
+    public func sendBatch(_ datagrams: [(ByteBuffer, SocketAddress)]) async throws {
+        let channel = try getStartedChannel()
+
+        // Validate all datagrams first
+        for (buffer, _) in datagrams {
+            guard buffer.readableBytes <= configuration.maxDatagramSize else {
+                throw UDPError.datagramTooLarge(
+                    size: buffer.readableBytes,
+                    max: configuration.maxDatagramSize
+                )
+            }
+        }
+
+        // Write all datagrams without flushing
+        for (buffer, address) in datagrams {
+            let envelope = AddressedEnvelope(remoteAddress: address, data: buffer)
+            channel.write(envelope, promise: nil)
+        }
+
+        // Single flush for all datagrams
+        channel.flush()
+    }
+
+    /// Sends multiple Data packets in a batch (convenience wrapper).
+    ///
+    /// - Parameters:
+    ///   - datagrams: Array of (data, address) tuples to send
+    /// - Throws: `UDPError` if any datagram is too large or transport is not started
+    public func sendBatch(_ datagrams: [(Data, SocketAddress)]) async throws {
+        let channel = try getStartedChannel()
+
+        // Convert to ByteBuffers and validate
+        var bufferDatagrams: [(ByteBuffer, SocketAddress)] = []
+        bufferDatagrams.reserveCapacity(datagrams.count)
+
+        for (data, address) in datagrams {
+            guard data.count <= configuration.maxDatagramSize else {
+                throw UDPError.datagramTooLarge(
+                    size: data.count,
+                    max: configuration.maxDatagramSize
+                )
+            }
+
+            var buffer = channel.allocator.buffer(capacity: data.count)
+            buffer.writeBytes(data)
+            bufferDatagrams.append((buffer, address))
+        }
+
+        // Write all without flushing
+        for (buffer, address) in bufferDatagrams {
+            let envelope = AddressedEnvelope(remoteAddress: address, data: buffer)
+            channel.write(envelope, promise: nil)
+        }
+
+        // Single flush
+        channel.flush()
+    }
+
     // MARK: - MulticastCapable
 
     /// Joins a multicast group.
