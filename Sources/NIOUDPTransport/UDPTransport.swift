@@ -87,11 +87,11 @@ public protocol UDPTransport: Sendable {
     ///           `UDPError.bindFailed` if binding fails
     func start() async throws
 
-    /// Stops the transport.
+    /// Shuts down the transport.
     ///
     /// Closes the socket and stops receiving datagrams.
     /// The `incomingDatagrams` stream will complete.
-    func stop() async
+    func shutdown() async throws
 }
 
 /// Extension protocol for multicast support.

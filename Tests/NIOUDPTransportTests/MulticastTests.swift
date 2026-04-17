@@ -15,7 +15,7 @@ struct MulticastTests {
 
         try await transport.start()
         try await transport.joinMulticastGroup("224.0.0.251", on: nil)
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Join IPv6 multicast group")
@@ -29,7 +29,7 @@ struct MulticastTests {
 
         try await transport.start()
         try await transport.joinMulticastGroup("ff02::fb", on: nil)
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Leave multicast group")
@@ -40,7 +40,7 @@ struct MulticastTests {
         try await transport.start()
         try await transport.joinMulticastGroup("224.0.0.251", on: nil)
         try await transport.leaveMulticastGroup("224.0.0.251", on: nil)
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Send to multicast group")
@@ -51,7 +51,7 @@ struct MulticastTests {
         try await transport.start()
         let testData = Data("Hello, Multicast!".utf8)
         try await transport.sendMulticast(testData, to: "224.0.0.251", port: 5353)
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Send ByteBuffer to multicast group")
@@ -63,7 +63,7 @@ struct MulticastTests {
         var buffer = ByteBufferAllocator().buffer(capacity: 16)
         buffer.writeString("Hello")
         try await transport.sendMulticast(buffer, to: "224.0.0.251", port: 5353)
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     // MARK: - Error Cases
@@ -100,7 +100,7 @@ struct MulticastTests {
             try await transport.joinMulticastGroup("192.168.1.1", on: nil)
         }
 
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Join with non-existent interface throws error")
@@ -114,6 +114,6 @@ struct MulticastTests {
             try await transport.joinMulticastGroup("224.0.0.251", on: "nonexistent0")
         }
 
-        await transport.stop()
+        try await transport.shutdown()
     }
 }

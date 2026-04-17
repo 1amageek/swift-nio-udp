@@ -20,7 +20,7 @@ struct ByteBufferAPITests {
         let address = try SocketAddress(ipAddress: "127.0.0.1", port: 8080)
         try await transport.send(buffer, to: address)
 
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Send ByteBuffer loopback receive")
@@ -67,8 +67,8 @@ struct ByteBufferAPITests {
         #expect(received != nil)
         #expect(received?.getString(at: 0, length: received?.readableBytes ?? 0) == "ByteBuffer Test")
 
-        await sender.stop()
-        await receiver.stop()
+        try await sender.shutdown()
+        try await receiver.shutdown()
     }
 
     @Test("ByteBuffer too large throws error")
@@ -91,7 +91,7 @@ struct ByteBufferAPITests {
             try await transport.send(buffer, to: address)
         }
 
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Received datagram buffer converts to Data correctly")
@@ -136,7 +136,7 @@ struct ByteBufferAPITests {
         let received = receivedData.withLock { $0 }
         #expect(received == testData)
 
-        await sender.stop()
-        await receiver.stop()
+        try await sender.shutdown()
+        try await receiver.shutdown()
     }
 }

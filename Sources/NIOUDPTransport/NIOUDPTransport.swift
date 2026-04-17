@@ -5,6 +5,7 @@
 import Foundation
 import NIOCore
 import NIOPosix
+import os
 import Synchronization
 
 #if canImport(Darwin)
@@ -13,12 +14,28 @@ import Darwin
 import Glibc
 #endif
 
+#if DEBUG
+private let nioUDPTransportDebugLoggingEnabled =
+    ProcessInfo.processInfo.environment["NIO_UDP_TRANSPORT_DEBUG"] == "1"
+#else
+private let nioUDPTransportDebugLoggingEnabled = false
+#endif
+
+private let nioUDPTransportLogger = Logger(subsystem: "NIOUDPTransport", category: "Transport")
+
+@inline(__always)
+private func nioUDPDebugLog(_ message: @autoclosure () -> String) {
+    guard nioUDPTransportDebugLoggingEnabled else { return }
+    let text = message()
+    nioUDPTransportLogger.debug("\(text, privacy: .public)")
+}
+
 /// SwiftNIO-based UDP transport implementation.
 ///
 /// Provides both unicast and multicast UDP communication using SwiftNIO's
 /// `DatagramBootstrap`.
 ///
-/// - Important: This transport is designed for **single use**. Once `stop()` is called,
+/// - Important: This transport is designed for **single use**. Once `shutdown()` is called,
 ///   the transport cannot be restarted. Create a new instance if you need to restart.
 ///
 /// ## Example
@@ -128,7 +145,7 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
     ///
     /// Binds to the configured address and begins receiving datagrams.
     ///
-    /// - Important: This method can only be called once. After `stop()` is called,
+    /// - Important: This method can only be called once. After `shutdown()` is called,
     ///   the transport cannot be restarted.
     ///
     /// - Throws: `UDPError.alreadyStarted` if already started or was previously stopped
@@ -150,10 +167,10 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
         do {
             let channel = try await createChannel()
 
-            // Check if stop() was called during createChannel()
+            // Check if shutdown() was called during createChannel()
             let shouldClose = state.withLock { state -> Bool in
                 if state.generation != startGeneration || state.status != .starting {
-                    // stop() was called, close the channel
+                    // shutdown() was called, close the channel
                     return true
                 }
                 state.channel = channel
@@ -162,7 +179,11 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
             }
 
             if shouldClose {
-                try? await channel.close()
+                do {
+                    try await channel.close()
+                } catch {
+                    assertionFailure("Failed to close UDP channel after concurrent shutdown: \(error)")
+                }
                 throw UDPError.channelClosed
             }
         } catch {
@@ -178,18 +199,18 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
         }
     }
 
-    /// Stops the transport.
+    /// Shuts down the transport.
     ///
     /// Closes the socket and stops receiving datagrams.
     /// The `incomingDatagrams` stream will complete.
     ///
     /// - Important: After calling this method, the transport cannot be restarted.
     ///   Create a new instance if you need to restart.
-    public func stop() async {
+    public func shutdown() async throws {
         let (channel, shouldCleanup) = state.withLock { state -> ((any Channel)?, Bool) in
             switch state.status {
             case .initial:
-                // Not started yet, nothing to stop - remain in initial state
+                // Not started yet, nothing to shutdown - remain in initial state
                 return (nil, false)
             case .starting:
                 // Mark as stopping, start() will detect this via generation check
@@ -211,11 +232,17 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
         // Early return if nothing to clean up
         guard shouldCleanup else { return }
 
+        var shutdownError: Error?
+
         if let channel {
-            try? await channel.close()
+            do {
+                try await channel.close()
+            } catch {
+                shutdownError = error
+            }
         }
 
-        // Finalize stop
+        // Finalize shutdown
         state.withLock { state in
             state.status = .stopped
         }
@@ -225,7 +252,17 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
         incomingContinuation.finish()
 
         if ownsEventLoopGroup {
-            try? await eventLoopGroup.shutdownGracefully()
+            do {
+                try await eventLoopGroup.shutdownGracefully()
+            } catch {
+                if shutdownError == nil {
+                    shutdownError = error
+                }
+            }
+        }
+
+        if let shutdownError {
+            throw UDPError.shutdownFailed(underlying: shutdownError)
         }
     }
 
@@ -341,8 +378,11 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
 
         do {
             let groupAddress = try SocketAddress(ipAddress: group, port: 0)
-
-            if let interfaceName = interface ?? configuration.networkInterface {
+            let interfaceName = resolvedMulticastInterfaceName(
+                for: groupAddress,
+                requestedInterface: interface
+            )
+            if let interfaceName {
                 let device = try await getDevice(named: interfaceName)
                 try await datagramChannel.joinGroup(groupAddress, device: device).get()
             } else {
@@ -370,8 +410,11 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
 
         do {
             let groupAddress = try SocketAddress(ipAddress: group, port: 0)
-
-            if let interfaceName = interface ?? configuration.networkInterface {
+            let interfaceName = resolvedMulticastInterfaceName(
+                for: groupAddress,
+                requestedInterface: interface
+            )
+            if let interfaceName {
                 let device = try await getDevice(named: interfaceName)
                 try await datagramChannel.leaveGroup(groupAddress, device: device).get()
             } else {
@@ -427,9 +470,12 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
     ) async throws {
         let envelope = AddressedEnvelope(remoteAddress: address, data: buffer)
 
+        nioUDPDebugLog("[NIOUDPTransport] sendBuffer: to=\(address), bytes=\(buffer.readableBytes), channel.isActive=\(channel.isActive)")
+
         do {
             try await channel.writeAndFlush(envelope)
         } catch {
+            nioUDPDebugLog("[NIOUDPTransport] sendBuffer FAILED: \(error)")
             throw UDPError.sendFailed(underlying: error)
         }
     }
@@ -557,22 +603,41 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
 
         let channel = try await bootstrap.bind(to: bindAddress).get()
 
-        // Set IP_MULTICAST_IF after binding (required for multicast send to work on macOS)
+        nioUDPDebugLog("[NIOUDPTransport] createChannel: bound to \(bindAddress), isIPv6=\(isIPv6), reusePort=\(configuration.reusePort), channel=\(type(of: channel)), isSocketOptionProvider=\(channel is SocketOptionProvider)")
+
+        // Set multicast interface after binding (required for multicast send to work)
         // Only set for multicast mode (reusePort == true) to avoid interfering with unicast
-        // Use NIO's SocketOptionProvider.unsafeSetSocketOption to set in_addr structure
-        if !isIPv6, configuration.reusePort, let socketChannel = channel as? SocketOptionProvider {
-            do {
-                let interfaceAddr = try getDefaultInterfaceAddress()
-                try await socketChannel.unsafeSetSocketOption(
-                    level: NIOBSDSocket.OptionLevel(rawValue: CInt(IPPROTO_IP)),
-                    name: NIOBSDSocket.Option(rawValue: CInt(IP_MULTICAST_IF)),
-                    value: interfaceAddr
-                ).get()
-            } catch {
-                // Log but don't fail - multicast may still work on some systems
-                #if DEBUG
-                print("Warning: Failed to set IP_MULTICAST_IF: \(error)")
-                #endif
+        if configuration.reusePort, let socketChannel = channel as? SocketOptionProvider {
+            if !isIPv6 {
+                // IPv4: Set IP_MULTICAST_IF with interface address (in_addr)
+                do {
+                    let interfaceAddr = getDefaultInterfaceAddress()
+                    let addrBytes = withUnsafeBytes(of: interfaceAddr.s_addr) { Array($0) }
+                    nioUDPDebugLog("IP_MULTICAST_IF: setting to \(addrBytes[0]).\(addrBytes[1]).\(addrBytes[2]).\(addrBytes[3])")
+                    try await socketChannel.unsafeSetSocketOption(
+                        level: NIOBSDSocket.OptionLevel(rawValue: CInt(IPPROTO_IP)),
+                        name: NIOBSDSocket.Option(rawValue: CInt(IP_MULTICAST_IF)),
+                        value: interfaceAddr
+                    ).get()
+                    nioUDPDebugLog("IP_MULTICAST_IF: set successfully")
+                } catch {
+                    nioUDPDebugLog("Warning: Failed to set IP_MULTICAST_IF: \(error)")
+                }
+            } else {
+                // IPv6: Set IPV6_MULTICAST_IF with interface index (CUnsignedInt)
+                // Required for link-local multicast (ff02::) to work
+                do {
+                    let ifindex = getDefaultInterfaceIndex()
+                    if ifindex > 0 {
+                        try await socketChannel.unsafeSetSocketOption(
+                            level: NIOBSDSocket.OptionLevel(rawValue: CInt(IPPROTO_IPV6)),
+                            name: NIOBSDSocket.Option(rawValue: CInt(IPV6_MULTICAST_IF)),
+                            value: ifindex
+                        ).get()
+                    }
+                } catch {
+                    nioUDPDebugLog("Warning: Failed to set IPV6_MULTICAST_IF: \(error)")
+                }
             }
         }
 
@@ -580,8 +645,8 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
     }
 
     /// Gets the first non-loopback IPv4 address for multicast interface
-    private func getDefaultInterfaceAddress() throws -> in_addr {
-        #if canImport(Darwin)
+    private func getDefaultInterfaceAddress() -> in_addr {
+        #if canImport(Darwin) || canImport(Glibc)
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else {
             return in_addr(s_addr: INADDR_ANY.bigEndian)
@@ -592,16 +657,17 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
         var ptr = firstAddr
         while true {
             let interface = ptr.pointee
-            let family = interface.ifa_addr.pointee.sa_family
 
-            // Look for non-loopback IPv4 address
-            if family == UInt8(AF_INET) {
+            // ifa_addr can be nil for some interfaces (utun, awdl, etc.)
+            if let addr = interface.ifa_addr, addr.pointee.sa_family == sa_family_t(AF_INET) {
                 let name = String(cString: interface.ifa_name)
-                if name != "lo0" && (interface.ifa_flags & UInt32(IFF_UP)) != 0 {
-                    let addr = interface.ifa_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                if name != "lo0" && !name.hasPrefix("lo")
+                    && (interface.ifa_flags & UInt32(IFF_UP)) != 0
+                {
+                    let sinAddr = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
                         $0.pointee.sin_addr
                     }
-                    return addr
+                    return sinAddr
                 }
             }
 
@@ -613,6 +679,96 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
         #else
         return in_addr(s_addr: in_addr_t(INADDR_ANY).bigEndian)
         #endif
+    }
+
+    /// Gets the first non-loopback interface index for IPv6 multicast
+    private func getDefaultInterfaceIndex() -> CUnsignedInt {
+        #if canImport(Darwin) || canImport(Glibc)
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else {
+            return 0
+        }
+
+        defer { freeifaddrs(ifaddr) }
+
+        var ptr = firstAddr
+        while true {
+            let interface = ptr.pointee
+
+            // Look for UP, non-loopback interface with an IPv4 or IPv6 address
+            if let addr = interface.ifa_addr {
+                let family = addr.pointee.sa_family
+                if family == sa_family_t(AF_INET) || family == sa_family_t(AF_INET6) {
+                    let name = String(cString: interface.ifa_name)
+                    if name != "lo0" && !name.hasPrefix("lo")
+                        && (interface.ifa_flags & UInt32(IFF_UP)) != 0
+                        && (interface.ifa_flags & UInt32(IFF_MULTICAST)) != 0
+                    {
+                        let index = if_nametoindex(interface.ifa_name)
+                        if index > 0 {
+                            return index
+                        }
+                    }
+                }
+            }
+
+            guard let next = interface.ifa_next else { break }
+            ptr = next
+        }
+
+        return 0
+        #else
+        return 0
+        #endif
+    }
+
+    private func resolvedMulticastInterfaceName(
+        for groupAddress: SocketAddress,
+        requestedInterface: String?
+    ) -> String? {
+        if let requestedInterface = requestedInterface ?? configuration.networkInterface {
+            return requestedInterface
+        }
+
+        if case .v6 = groupAddress {
+            return getDefaultMulticastInterfaceName()
+        }
+
+        return nil
+    }
+
+    private func getDefaultMulticastInterfaceName() -> String? {
+        #if canImport(Darwin) || canImport(Glibc)
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else {
+            return nil
+        }
+
+        defer { freeifaddrs(ifaddr) }
+
+        var ptr = firstAddr
+        while true {
+            let interface = ptr.pointee
+
+            if let addr = interface.ifa_addr {
+                let family = addr.pointee.sa_family
+                if family == sa_family_t(AF_INET) || family == sa_family_t(AF_INET6) {
+                    let name = String(cString: interface.ifa_name)
+                    if name != "lo0" && !name.hasPrefix("lo")
+                        && (interface.ifa_flags & UInt32(IFF_UP)) != 0
+                        && (interface.ifa_flags & UInt32(IFF_MULTICAST)) != 0
+                    {
+                        return name
+                    }
+                }
+            }
+
+            guard let next = interface.ifa_next else { break }
+            ptr = next
+        }
+        #endif
+
+        return nil
     }
 
     /// Gets a network device by name, using cache.
@@ -670,8 +826,6 @@ private final class DatagramHandler: ChannelInboundHandler, @unchecked Sendable 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
         // Log error but keep channel open for UDP
         // UDP is connectionless, so individual errors shouldn't close the channel
-        #if DEBUG
-        print("NIOUDPTransport channel error: \(error)")
-        #endif
+        nioUDPDebugLog("[NIOUDPTransport] errorCaught: \(error) (type: \(type(of: error)), channel.isActive=\(context.channel.isActive))")
     }
 }

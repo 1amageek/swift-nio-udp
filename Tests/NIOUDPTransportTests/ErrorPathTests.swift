@@ -34,16 +34,16 @@ struct ErrorPathTests {
             try await transport2.start()
         }
 
-        await transport1.stop()
+        try await transport1.shutdown()
     }
 
-    @Test("Send after stop throws notStarted")
-    func sendAfterStop() async throws {
+    @Test("Send after shutdown throws notStarted")
+    func sendAfterShutdown() async throws {
         let config = UDPConfiguration.unicast(port: 0)
         let transport = NIOUDPTransport(configuration: config)
 
         try await transport.start()
-        await transport.stop()
+        try await transport.shutdown()
 
         let address = try SocketAddress(ipAddress: "127.0.0.1", port: 8080)
 
@@ -52,13 +52,13 @@ struct ErrorPathTests {
         }
     }
 
-    @Test("Restart after stop throws alreadyStarted")
-    func restartAfterStop() async throws {
+    @Test("Restart after shutdown throws alreadyStarted")
+    func restartAfterShutdown() async throws {
         let config = UDPConfiguration.unicast(port: 0)
         let transport = NIOUDPTransport(configuration: config)
 
         try await transport.start()
-        await transport.stop()
+        try await transport.shutdown()
 
         await #expect(throws: UDPError.self) {
             try await transport.start()
@@ -75,7 +75,7 @@ struct ErrorPathTests {
         try await transport.start()
         let address = try SocketAddress(ipAddress: "127.0.0.1", port: 8080)
         try await transport.send(Data(), to: address)
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Datagram at exact max size succeeds")
@@ -91,7 +91,7 @@ struct ErrorPathTests {
         let data = Data(repeating: 0x42, count: maxSize)
         let address = try SocketAddress(ipAddress: "127.0.0.1", port: 8080)
         try await transport.send(data, to: address)
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Datagram one byte over max throws error")
@@ -111,7 +111,7 @@ struct ErrorPathTests {
             try await transport.send(data, to: address)
         }
 
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     // MARK: - Error Messages

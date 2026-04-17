@@ -16,7 +16,7 @@ struct ConfigurationValidationTests {
         try await transport.start()
         let address = await transport.localAddress
         #expect(address != nil)
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("IPv6Any configuration binds to ::")
@@ -27,7 +27,7 @@ struct ConfigurationValidationTests {
         try await transport.start()
         let address = await transport.localAddress
         #expect(address != nil)
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Specific host configuration")
@@ -39,7 +39,7 @@ struct ConfigurationValidationTests {
         let address = await transport.localAddress
         #expect(address != nil)
         #expect(address?.host == "127.0.0.1")
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Port 0 auto-assigns available port")
@@ -51,7 +51,7 @@ struct ConfigurationValidationTests {
         let address = await transport.localAddress
         #expect(address?.port != nil)
         #expect(address!.port! > 0)
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     // MARK: - Buffer Sizes
@@ -65,7 +65,7 @@ struct ConfigurationValidationTests {
         let transport = NIOUDPTransport(configuration: config)
 
         try await transport.start()
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Custom send buffer size is applied")
@@ -77,7 +77,7 @@ struct ConfigurationValidationTests {
         let transport = NIOUDPTransport(configuration: config)
 
         try await transport.start()
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Custom stream buffer size is applied")
@@ -89,7 +89,7 @@ struct ConfigurationValidationTests {
         let transport = NIOUDPTransport(configuration: config)
 
         try await transport.start()
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     // MARK: - Presets

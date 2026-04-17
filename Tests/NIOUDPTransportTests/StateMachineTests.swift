@@ -10,29 +10,29 @@ struct StateMachineTests {
 
     // MARK: - State Transitions
 
-    @Test("Stop on non-started transport is no-op")
-    func stopOnNonStarted() async {
+    @Test("Shutdown on non-started transport is no-op")
+    func shutdownOnNonStarted() async throws {
         let config = UDPConfiguration.unicast(port: 0)
         let transport = NIOUDPTransport(configuration: config)
 
-        await transport.stop()
+        try await transport.shutdown()
         // Should complete without error
     }
 
-    @Test("Double stop is idempotent")
-    func doubleStop() async throws {
+    @Test("Double shutdown is idempotent")
+    func doubleShutdown() async throws {
         let config = UDPConfiguration.unicast(port: 0)
         let transport = NIOUDPTransport(configuration: config)
 
         try await transport.start()
-        await transport.stop()
-        await transport.stop()
+        try await transport.shutdown()
+        try await transport.shutdown()
     }
 
     // MARK: - Lifecycle
 
-    @Test("AsyncStream completes on stop")
-    func asyncStreamCompletesOnStop() async throws {
+    @Test("AsyncStream completes on shutdown")
+    func asyncStreamCompletesOnShutdown() async throws {
         let config = UDPConfiguration.unicast(port: 0)
         let transport = NIOUDPTransport(configuration: config)
 
@@ -48,7 +48,7 @@ struct StateMachineTests {
         }
 
         try await Task.sleep(for: .milliseconds(50))
-        await transport.stop()
+        try await transport.shutdown()
         try await Task.sleep(for: .milliseconds(100))
         task.cancel()
 
@@ -65,8 +65,8 @@ struct StateMachineTests {
         #expect(address == nil)
     }
 
-    @Test("LocalAddress is nil after stop")
-    func localAddressAfterStop() async throws {
+    @Test("LocalAddress is nil after shutdown")
+    func localAddressAfterShutdown() async throws {
         let config = UDPConfiguration.unicast(port: 0)
         let transport = NIOUDPTransport(configuration: config)
 
@@ -74,7 +74,7 @@ struct StateMachineTests {
         let addressBefore = await transport.localAddress
         #expect(addressBefore != nil)
 
-        await transport.stop()
+        try await transport.shutdown()
 
         let addressAfter = await transport.localAddress
         #expect(addressAfter == nil)
@@ -101,17 +101,17 @@ struct StateMachineTests {
             }
         }
 
-        await transport.stop()
+        try await transport.shutdown()
     }
 
-    @Test("Rapid start-stop cycles complete cleanly", .timeLimit(.minutes(1)))
-    func rapidStartStopCycles() async throws {
+    @Test("Rapid start-shutdown cycles complete cleanly", .timeLimit(.minutes(1)))
+    func rapidStartShutdownCycles() async throws {
         for _ in 0..<5 {
             let config = UDPConfiguration.unicast(port: 0)
             let transport = NIOUDPTransport(configuration: config)
 
             try await transport.start()
-            await transport.stop()
+            try await transport.shutdown()
         }
     }
 
@@ -131,11 +131,11 @@ struct StateMachineTests {
         }
 
         for transport in transports {
-            await transport.stop()
+            try await transport.shutdown()
         }
     }
 
-    @Test("External EventLoopGroup is not shutdown on stop")
+    @Test("External EventLoopGroup is not shut down on shutdown")
     func externalEventLoopGroupNotShutdown() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
 
@@ -143,12 +143,12 @@ struct StateMachineTests {
         let transport = NIOUDPTransport(configuration: config, eventLoopGroup: group)
 
         try await transport.start()
-        await transport.stop()
+        try await transport.shutdown()
 
         // Group should still be usable
         let transport2 = NIOUDPTransport(configuration: config, eventLoopGroup: group)
         try await transport2.start()
-        await transport2.stop()
+        try await transport2.shutdown()
 
         try await group.shutdownGracefully()
     }

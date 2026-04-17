@@ -260,7 +260,7 @@ struct BenchmarkTests {
         let perIteration = elapsed / iterations
         let throughputMBps = (Double(iterations) * 256.0) / elapsed.totalSeconds / 1_000_000.0
 
-        await transport.stop()
+        try await transport.shutdown()
 
         print("Loopback send (256 bytes): \(perIteration) per iteration (\(iterations) iterations)")
         print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) datagrams/sec")
@@ -324,8 +324,8 @@ struct BenchmarkTests {
         let received = receivedCount.withLock { $0 }
 
         receiveTask.cancel()
-        await sender.stop()
-        await receiver.stop()
+        try await sender.shutdown()
+        try await receiver.shutdown()
 
         let perIteration = elapsed / iterations
         let lossRate = Double(iterations - received) / Double(iterations) * 100
@@ -402,7 +402,7 @@ struct BenchmarkTests {
         let perBatch = elapsed / iterations
         let throughputMBps = (Double(totalDatagrams) * 256.0) / elapsed.totalSeconds / 1_000_000.0
 
-        await transport.stop()
+        try await transport.shutdown()
 
         print("Batch send (10x256 bytes): \(perBatch) per batch (\(iterations) batches)")
         print("  Throughput: \(Double(totalDatagrams) / elapsed.totalSeconds) datagrams/sec")
@@ -452,7 +452,7 @@ struct BenchmarkTests {
         }
         let elapsedBatch = ContinuousClock.now - startBatch
 
-        await transport.stop()
+        try await transport.shutdown()
 
         let totalDatagrams = iterations * batchSize
         let singleMBps = (Double(totalDatagrams) * 256.0) / elapsedSingle.totalSeconds / 1_000_000.0

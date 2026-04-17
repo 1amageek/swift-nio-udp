@@ -88,7 +88,7 @@ struct NIOUDPTransportTests {
         #expect(localAddr?.port != nil)
         #expect(localAddr!.port! > 0)
 
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Double start throws error")
@@ -102,7 +102,7 @@ struct NIOUDPTransportTests {
             try await transport.start()
         }
 
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     @Test("Send before start throws error")
@@ -177,8 +177,8 @@ struct NIOUDPTransportTests {
         let received = receivedData.withLock { $0 }
         #expect(received == testData)
 
-        await transport1.stop()
-        await transport2.stop()
+        try await transport1.shutdown()
+        try await transport2.shutdown()
     }
 
     @Test("Large datagram is rejected")
@@ -195,7 +195,7 @@ struct NIOUDPTransportTests {
             try await transport.send(largeData, to: address)
         }
 
-        await transport.stop()
+        try await transport.shutdown()
     }
 
     // MARK: - Error Tests

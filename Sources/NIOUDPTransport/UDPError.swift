@@ -30,6 +30,9 @@ public enum UDPError: Error, Sendable {
     /// Channel closed unexpectedly.
     case channelClosed
 
+    /// Failed to shut down transport resources.
+    case shutdownFailed(underlying: Error)
+
     /// Operation timed out.
     case timeout
 
@@ -56,6 +59,8 @@ extension UDPError: CustomStringConvertible {
             return "Multicast error: \(message)"
         case .channelClosed:
             return "Channel closed unexpectedly"
+        case .shutdownFailed(let error):
+            return "Failed to shut down transport: \(error)"
         case .timeout:
             return "Operation timed out"
         case .invalidConfiguration(let message):
