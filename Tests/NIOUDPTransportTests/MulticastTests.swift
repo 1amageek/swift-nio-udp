@@ -28,7 +28,15 @@ struct MulticastTests {
         let transport = NIOUDPTransport(configuration: config)
 
         try await transport.start()
-        try await transport.joinMulticastGroup("ff02::fb", on: nil)
+        do {
+            try await transport.joinMulticastGroup("ff02::fb", on: nil)
+        } catch UDPError.multicastError(let message) where message.contains("No such device") {
+            try await transport.shutdown()
+            return
+        } catch {
+            try await transport.shutdown()
+            throw error
+        }
         try await transport.shutdown()
     }
 

@@ -5,7 +5,6 @@
 import Foundation
 import NIOCore
 import NIOPosix
-import os
 import Synchronization
 
 #if canImport(Darwin)
@@ -21,13 +20,10 @@ private let nioUDPTransportDebugLoggingEnabled =
 private let nioUDPTransportDebugLoggingEnabled = false
 #endif
 
-private let nioUDPTransportLogger = Logger(subsystem: "NIOUDPTransport", category: "Transport")
-
 @inline(__always)
 private func nioUDPDebugLog(_ message: @autoclosure () -> String) {
     guard nioUDPTransportDebugLoggingEnabled else { return }
-    let text = message()
-    nioUDPTransportLogger.debug("\(text, privacy: .public)")
+    print("[NIOUDPTransport] \(message())")
 }
 
 /// SwiftNIO-based UDP transport implementation.
@@ -552,25 +548,25 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
                 level: .init(rawValue: IPPROTO_IP),
                 name: .init(rawValue: IP_MULTICAST_LOOP)
             )
-            bootstrap = bootstrap.channelOption(multicastLoopOption, value: CInt(1))
+            bootstrap = bootstrap.channelOption(multicastLoopOption, value: 1)
 
             let multicastTTLOption = ChannelOptions.Types.SocketOption(
                 level: .init(rawValue: IPPROTO_IP),
                 name: .init(rawValue: IP_MULTICAST_TTL)
             )
-            bootstrap = bootstrap.channelOption(multicastTTLOption, value: CInt(255))
+            bootstrap = bootstrap.channelOption(multicastTTLOption, value: 255)
             #elseif os(Linux)
             let multicastLoopOption = ChannelOptions.Types.SocketOption(
                 level: .init(rawValue: CInt(IPPROTO_IP)),
                 name: .init(rawValue: CInt(IP_MULTICAST_LOOP))
             )
-            bootstrap = bootstrap.channelOption(multicastLoopOption, value: CInt(1))
+            bootstrap = bootstrap.channelOption(multicastLoopOption, value: 1)
 
             let multicastTTLOption = ChannelOptions.Types.SocketOption(
                 level: .init(rawValue: CInt(IPPROTO_IP)),
                 name: .init(rawValue: CInt(IP_MULTICAST_TTL))
             )
-            bootstrap = bootstrap.channelOption(multicastTTLOption, value: CInt(255))
+            bootstrap = bootstrap.channelOption(multicastTTLOption, value: 255)
             #endif
         } else {
             // IPv6: Enable IPV6_MULTICAST_LOOP and set multicast hops
@@ -579,25 +575,25 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
                 level: .init(rawValue: IPPROTO_IPV6),
                 name: .init(rawValue: IPV6_MULTICAST_LOOP)
             )
-            bootstrap = bootstrap.channelOption(multicastLoopOption, value: CInt(1))
+            bootstrap = bootstrap.channelOption(multicastLoopOption, value: 1)
 
             let multicastHopsOption = ChannelOptions.Types.SocketOption(
                 level: .init(rawValue: IPPROTO_IPV6),
                 name: .init(rawValue: IPV6_MULTICAST_HOPS)
             )
-            bootstrap = bootstrap.channelOption(multicastHopsOption, value: CInt(255))
+            bootstrap = bootstrap.channelOption(multicastHopsOption, value: 255)
             #elseif os(Linux)
             let multicastLoopOption = ChannelOptions.Types.SocketOption(
                 level: .init(rawValue: CInt(IPPROTO_IPV6)),
                 name: .init(rawValue: CInt(IPV6_MULTICAST_LOOP))
             )
-            bootstrap = bootstrap.channelOption(multicastLoopOption, value: CInt(1))
+            bootstrap = bootstrap.channelOption(multicastLoopOption, value: 1)
 
             let multicastHopsOption = ChannelOptions.Types.SocketOption(
                 level: .init(rawValue: CInt(IPPROTO_IPV6)),
                 name: .init(rawValue: CInt(IPV6_MULTICAST_HOPS))
             )
-            bootstrap = bootstrap.channelOption(multicastHopsOption, value: CInt(255))
+            bootstrap = bootstrap.channelOption(multicastHopsOption, value: 255)
             #endif
         }
 
