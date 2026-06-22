@@ -50,10 +50,13 @@ private func nioUDPDebugLog(_ message: @autoclosure () -> String) {
 /// try await mdns.joinMulticastGroup("224.0.0.251", on: nil)
 /// ```
 public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked Sendable {
-    // Note: @unchecked Sendable is used because:
-    // - All mutable state is protected by Mutex
-    // - Channel, EventLoopGroup, and NIONetworkDevice from SwiftNIO are thread-safe
-    // - The class uses proper synchronization for all state access
+    // @unchecked Sendable is required because this type stores non-Sendable
+    // SwiftNIO values (`any Channel`, `NIONetworkDevice`) inside `State`. Those
+    // values are never exposed directly: every read or write of mutable state is
+    // funneled through `Mutex<State>`, which provides the synchronization that the
+    // compiler cannot verify for the wrapped non-Sendable types. The remaining
+    // stored properties (configuration, allocator, continuation, atomic flag) are
+    // themselves Sendable. There is no unsynchronized shared mutable state.
 
     // MARK: - Properties
 
@@ -203,25 +206,28 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
     /// - Important: After calling this method, the transport cannot be restarted.
     ///   Create a new instance if you need to restart.
     public func shutdown() async throws {
-        let (channel, shouldCleanup) = state.withLock { state -> ((any Channel)?, Bool) in
+        let (channel, joinedGroups, deviceCache, shouldCleanup) = state.withLock {
+            state -> ((any Channel)?, Set<String>, [String: NIONetworkDevice], Bool) in
             switch state.status {
             case .initial:
                 // Not started yet, nothing to shutdown - remain in initial state
-                return (nil, false)
+                return (nil, [], [:], false)
             case .starting:
                 // Mark as stopping, start() will detect this via generation check
                 state.status = .stopping
                 state.generation += 1
-                return (nil, true)
+                return (nil, [], [:], true)
             case .started:
                 state.status = .stopping
                 let ch = state.channel
+                let groups = state.joinedGroups
+                let devices = state.deviceCache
                 state.channel = nil
                 state.joinedGroups.removeAll()
                 state.deviceCache.removeAll()
-                return (ch, true)
+                return (ch, groups, devices, true)
             case .stopping, .stopped:
-                return (nil, false)
+                return (nil, [], [:], false)
             }
         }
 
@@ -231,6 +237,32 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
         var shutdownError: Error?
 
         if let channel {
+            // Explicitly leave every joined multicast group before closing the
+            // channel. An explicit IGMP/MLD leave is the correct protocol behavior
+            // and avoids stale membership lingering on shared (SO_REUSEPORT) sockets.
+            //
+            // These leaves are intentionally best-effort and do NOT fail shutdown:
+            // closing the channel below releases kernel membership unconditionally,
+            // so the actual cleanup goal is met regardless. A leave can legitimately
+            // be rejected by the OS (e.g. EADDRNOTAVAIL when the membership's
+            // interface no longer matches). Such failures are surfaced via the debug
+            // log rather than swallowed, but are not promoted to `shutdownFailed`,
+            // which is reserved for failures that leave resources actually leaked
+            // (channel close, event-loop shutdown).
+            if let multicastChannel = channel as? (any MulticastChannel) {
+                for group in joinedGroups {
+                    do {
+                        try await leaveGroupOnChannel(
+                            multicastChannel,
+                            group: group,
+                            deviceCache: deviceCache
+                        )
+                    } catch {
+                        nioUDPDebugLog("[NIOUDPTransport] shutdown: best-effort leave of group \(group) failed (membership is still released by channel close): \(error)")
+                    }
+                }
+            }
+
             do {
                 try await channel.close()
             } catch {
@@ -314,14 +346,7 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
             }
         }
 
-        // Write all datagrams without flushing
-        for (buffer, address) in datagrams {
-            let envelope = AddressedEnvelope(remoteAddress: address, data: buffer)
-            channel.write(envelope, promise: nil)
-        }
-
-        // Single flush for all datagrams
-        channel.flush()
+        try await writeBatch(datagrams, on: channel)
     }
 
     /// Sends multiple Data packets in a batch (convenience wrapper).
@@ -349,14 +374,7 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
             bufferDatagrams.append((buffer, address))
         }
 
-        // Write all without flushing
-        for (buffer, address) in bufferDatagrams {
-            let envelope = AddressedEnvelope(remoteAddress: address, data: buffer)
-            channel.write(envelope, promise: nil)
-        }
-
-        // Single flush
-        channel.flush()
+        try await writeBatch(bufferDatagrams, on: channel)
     }
 
     // MARK: - MulticastCapable
@@ -447,6 +465,38 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
 
     // MARK: - Private
 
+    /// Leaves a multicast group on a specific channel, resolving the interface the
+    /// same way `joinMulticastGroup`/`leaveMulticastGroup` do.
+    ///
+    /// Used during `shutdown()` where state has already been captured and cleared,
+    /// so the device cache is passed in explicitly rather than read from `state`.
+    private func leaveGroupOnChannel(
+        _ channel: any MulticastChannel,
+        group: String,
+        deviceCache: [String: NIONetworkDevice]
+    ) async throws {
+        let groupAddress = try SocketAddress(ipAddress: group, port: 0)
+        let interfaceName = resolvedMulticastInterfaceName(
+            for: groupAddress,
+            requestedInterface: nil
+        )
+        if let interfaceName {
+            let device: NIONetworkDevice
+            if let cached = deviceCache[interfaceName] {
+                device = cached
+            } else {
+                let devices = try System.enumerateDevices()
+                guard let resolved = devices.first(where: { $0.name == interfaceName }) else {
+                    throw UDPError.multicastError("Interface not found: \(interfaceName)")
+                }
+                device = resolved
+            }
+            try await channel.leaveGroup(groupAddress, device: device).get()
+        } else {
+            try await channel.leaveGroup(groupAddress).get()
+        }
+    }
+
     /// Gets the channel if started, throws if not.
     @inline(__always)
     private func getStartedChannel() throws -> any Channel {
@@ -473,6 +523,54 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
         } catch {
             nioUDPDebugLog("[NIOUDPTransport] sendBuffer FAILED: \(error)")
             throw UDPError.sendFailed(underlying: error)
+        }
+    }
+
+    /// Writes a batch of datagrams with one flush, then awaits every per-datagram
+    /// promise and aggregates any failures into a thrown `UDPError.batchSendFailed`.
+    ///
+    /// This keeps the throughput benefit of a single flush while matching the
+    /// single-send path's contract: a reported success means every datagram was
+    /// accepted by the channel. Per-datagram errors are never silently dropped.
+    private func writeBatch(
+        _ datagrams: [(ByteBuffer, SocketAddress)],
+        on channel: any Channel
+    ) async throws {
+        guard !datagrams.isEmpty else { return }
+
+        // Write all datagrams with individual promises, without flushing.
+        var futures: [EventLoopFuture<Void>] = []
+        futures.reserveCapacity(datagrams.count)
+        for (buffer, address) in datagrams {
+            let envelope = AddressedEnvelope(remoteAddress: address, data: buffer)
+            let promise = channel.eventLoop.makePromise(of: Void.self)
+            channel.write(envelope, promise: promise)
+            futures.append(promise.futureResult)
+        }
+
+        // Single flush for all datagrams.
+        channel.flush()
+
+        // Await every promise individually so one failure does not mask the rest.
+        var firstError: Error?
+        var failedCount = 0
+        for future in futures {
+            do {
+                try await future.get()
+            } catch {
+                failedCount += 1
+                if firstError == nil {
+                    firstError = error
+                }
+            }
+        }
+
+        if let firstError {
+            throw UDPError.batchSendFailed(
+                failedCount: failedCount,
+                total: datagrams.count,
+                firstError: firstError
+            )
         }
     }
 
@@ -605,11 +703,11 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
         // Only set for multicast mode (reusePort == true) to avoid interfering with unicast
         if configuration.reusePort, let socketChannel = channel as? SocketOptionProvider {
             if !isIPv6 {
-                // IPv4: Set IP_MULTICAST_IF with interface address (in_addr)
+                // IPv4: Set IP_MULTICAST_IF with interface address (in_addr).
+                let interfaceAddr = getDefaultInterfaceAddress()
+                let addrBytes = withUnsafeBytes(of: interfaceAddr.s_addr) { Array($0) }
+                nioUDPDebugLog("IP_MULTICAST_IF: setting to \(addrBytes[0]).\(addrBytes[1]).\(addrBytes[2]).\(addrBytes[3])")
                 do {
-                    let interfaceAddr = getDefaultInterfaceAddress()
-                    let addrBytes = withUnsafeBytes(of: interfaceAddr.s_addr) { Array($0) }
-                    nioUDPDebugLog("IP_MULTICAST_IF: setting to \(addrBytes[0]).\(addrBytes[1]).\(addrBytes[2]).\(addrBytes[3])")
                     try await socketChannel.unsafeSetSocketOption(
                         level: NIOBSDSocket.OptionLevel(rawValue: CInt(IPPROTO_IP)),
                         name: NIOBSDSocket.Option(rawValue: CInt(IP_MULTICAST_IF)),
@@ -617,22 +715,46 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
                     ).get()
                     nioUDPDebugLog("IP_MULTICAST_IF: set successfully")
                 } catch {
-                    nioUDPDebugLog("Warning: Failed to set IP_MULTICAST_IF: \(error)")
+                    // Surface the failure rather than reporting a healthy transport:
+                    // a socket whose outbound multicast interface could not be set
+                    // will silently fail to deliver multicast traffic.
+                    nioUDPDebugLog("Failed to set IP_MULTICAST_IF: \(error)")
+                    do {
+                        try await channel.close()
+                    } catch {
+                        nioUDPDebugLog("Failed to close channel after IP_MULTICAST_IF error: \(error)")
+                    }
+                    throw UDPError.multicastError("Failed to set IP_MULTICAST_IF: \(error)")
                 }
             } else {
-                // IPv6: Set IPV6_MULTICAST_IF with interface index (CUnsignedInt)
-                // Required for link-local multicast (ff02::) to work
-                do {
-                    let ifindex = getDefaultInterfaceIndex()
-                    if ifindex > 0 {
-                        try await socketChannel.unsafeSetSocketOption(
-                            level: NIOBSDSocket.OptionLevel(rawValue: CInt(IPPROTO_IPV6)),
-                            name: NIOBSDSocket.Option(rawValue: CInt(IPV6_MULTICAST_IF)),
-                            value: ifindex
-                        ).get()
+                // IPv6: Set IPV6_MULTICAST_IF with interface index (CUnsignedInt).
+                // This is mandatory for link-local multicast (ff02::) to work: without
+                // a scope/interface the kernel cannot route the datagram.
+                let ifindex = getDefaultInterfaceIndex()
+                guard ifindex > 0 else {
+                    do {
+                        try await channel.close()
+                    } catch {
+                        nioUDPDebugLog("Failed to close channel after missing IPv6 interface: \(error)")
                     }
+                    throw UDPError.multicastError(
+                        "No usable IPv6 multicast interface found (IPV6_MULTICAST_IF requires a scope for link-local groups)"
+                    )
+                }
+                do {
+                    try await socketChannel.unsafeSetSocketOption(
+                        level: NIOBSDSocket.OptionLevel(rawValue: CInt(IPPROTO_IPV6)),
+                        name: NIOBSDSocket.Option(rawValue: CInt(IPV6_MULTICAST_IF)),
+                        value: ifindex
+                    ).get()
                 } catch {
-                    nioUDPDebugLog("Warning: Failed to set IPV6_MULTICAST_IF: \(error)")
+                    nioUDPDebugLog("Failed to set IPV6_MULTICAST_IF: \(error)")
+                    do {
+                        try await channel.close()
+                    } catch {
+                        nioUDPDebugLog("Failed to close channel after IPV6_MULTICAST_IF error: \(error)")
+                    }
+                    throw UDPError.multicastError("Failed to set IPV6_MULTICAST_IF: \(error)")
                 }
             }
         }
@@ -797,8 +919,14 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked S
 
 /// Channel handler for processing incoming datagrams.
 private final class DatagramHandler: ChannelInboundHandler, @unchecked Sendable {
-    // Note: @unchecked Sendable because weak reference to transport is thread-safe
-    // and the handler is only accessed from the NIO event loop.
+    // @unchecked Sendable is required because `ChannelInboundHandler` conformance
+    // demands Sendable while this type holds a `weak` reference. The reference is
+    // `weak` to break the retain cycle transport -> channel -> pipeline -> handler
+    // -> transport. It is assigned once in `init` and afterwards only read from NIO
+    // event-loop callbacks (`channelRead`, `errorCaught`), which NIO serializes on a
+    // single event loop; weak-reference loads are themselves thread-safe. The
+    // referent (`NIOUDPTransport`) is Sendable and the hand-off to it
+    // (`handleIncomingDatagram`) is internally synchronized.
     typealias InboundIn = AddressedEnvelope<ByteBuffer>
 
     private weak var transport: NIOUDPTransport?

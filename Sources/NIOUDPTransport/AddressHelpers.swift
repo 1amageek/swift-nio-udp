@@ -143,12 +143,16 @@ extension Data {
     /// - Parameter buffer: The ByteBuffer to read from
     @inlinable
     public init(buffer: ByteBuffer) {
-        var buffer = buffer
-        if let bytes = buffer.readBytes(length: buffer.readableBytes) {
-            self = Data(bytes)
-        } else {
+        // `getBytes(at:length:)` over the buffer's own readable range cannot return
+        // nil: the requested range is exactly the readable region. Treating a nil
+        // result as an impossible state (rather than silently substituting empty
+        // Data) makes the invariant explicit and surfaces any future regression.
+        guard let bytes = buffer.getBytes(at: buffer.readerIndex, length: buffer.readableBytes) else {
+            assertionFailure("ByteBuffer.getBytes returned nil for its own readable range")
             self = Data()
+            return
         }
+        self = Data(bytes)
     }
 }
 

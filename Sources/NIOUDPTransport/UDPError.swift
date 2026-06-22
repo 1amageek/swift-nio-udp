@@ -18,6 +18,12 @@ public enum UDPError: Error, Sendable {
     /// Failed to send datagram.
     case sendFailed(underlying: Error)
 
+    /// One or more datagrams in a batch send failed.
+    ///
+    /// `failedCount` is the number of datagrams that failed out of `total`, and
+    /// `firstError` is the first underlying failure encountered.
+    case batchSendFailed(failedCount: Int, total: Int, firstError: Error)
+
     /// Invalid address format.
     case invalidAddress(String)
 
@@ -51,6 +57,8 @@ extension UDPError: CustomStringConvertible {
             return "Failed to bind: \(error)"
         case .sendFailed(let error):
             return "Failed to send: \(error)"
+        case .batchSendFailed(let failedCount, let total, let firstError):
+            return "Batch send failed for \(failedCount) of \(total) datagram(s); first error: \(firstError)"
         case .invalidAddress(let address):
             return "Invalid address: \(address)"
         case .datagramTooLarge(let size, let max):
