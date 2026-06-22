@@ -9,7 +9,7 @@ A high-performance UDP transport layer built on SwiftNIO with support for unicas
 - **Zero-Copy** - Direct ByteBuffer integration for minimal memory copies
 - **Modern Swift** - Uses Swift 6 concurrency with Mutex and Sendable types
 - **AsyncStream** - Incoming datagrams delivered via AsyncStream with configurable buffering
-- **Comprehensive Testing** - 67 tests covering functionality, error handling, and performance
+- **Comprehensive Testing** - 70 tests covering functionality, error handling, and performance
 
 ## Requirements
 
@@ -22,7 +22,7 @@ Add swift-nio-udp to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.0.0")
+    .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.2")
 ]
 ```
 
@@ -68,8 +68,8 @@ for await datagram in transport.incomingDatagrams {
     let data = datagram.data
 }
 
-// Stop when done
-await transport.stop()
+// Shut down when done
+try await transport.shutdown()
 ```
 
 ### Multicast Communication
@@ -98,9 +98,11 @@ for await datagram in transport.incomingDatagrams {
     print("Multicast from \(datagram.remoteAddress)")
 }
 
-// Leave group and stop
+// Leave group and shut down.
+// (shutdown() also explicitly leaves any still-joined groups before
+// closing the channel, so an explicit leave is optional.)
 try await transport.leaveMulticastGroup("224.0.0.251", on: nil)
-await transport.stop()
+try await transport.shutdown()
 ```
 
 ### IPv6 Multicast
@@ -118,6 +120,27 @@ let config = UDPConfiguration(
 let transport = NIOUDPTransport(configuration: config)
 try await transport.start()
 try await transport.joinMulticastGroup("ff02::fb", on: nil)  // mDNS IPv6
+```
+
+### Batch Send
+
+```swift
+import NIOUDPTransport
+import NIOCore
+
+let transport = NIOUDPTransport(configuration: .unicast(port: 5000))
+try await transport.start()
+
+let a = try SocketAddress(ipAddress: "192.168.1.10", port: 5001)
+let b = try SocketAddress(ipAddress: "192.168.1.11", port: 5001)
+
+// Send multiple datagrams with a single flush (higher throughput).
+// Per-datagram failures are aggregated and reported as
+// UDPError.batchSendFailed; they are never silently dropped.
+try await transport.sendBatch([
+    (Data("one".utf8), a),
+    (Data("two".utf8), b),
+])
 ```
 
 ## API Reference
@@ -146,8 +169,8 @@ public protocol UDPTransport: Sendable {
     /// Start the transport
     func start() async throws
 
-    /// Stop the transport
-    func stop() async
+    /// Shut down the transport
+    func shutdown() async throws
 
     /// Send data to a remote address
     func send(_ data: Data, to address: SocketAddress) async throws
@@ -226,19 +249,26 @@ let customConfig = UDPConfiguration(
 ## Error Handling
 
 ```swift
-public enum UDPError: Error {
+public enum UDPError: Error, Sendable {
     case notStarted                           // Transport not started
-    case alreadyStarted                       // Transport already started or stopped
+    case alreadyStarted                       // Transport already started
     case bindFailed(underlying: Error)        // Failed to bind to address
     case sendFailed(underlying: Error)        // Failed to send datagram
+    case batchSendFailed(failedCount: Int, total: Int, firstError: Error) // One or more datagrams in a batch failed
     case invalidAddress(String)               // Invalid address format
     case datagramTooLarge(size: Int, max: Int) // Datagram exceeds max size
     case multicastError(String)               // Multicast operation failed
     case channelClosed                        // Channel closed unexpectedly
+    case shutdownFailed(underlying: Error)    // Failed to shut down transport resources
     case timeout                              // Operation timed out
     case invalidConfiguration(String)         // Invalid configuration value
 }
 ```
+
+Failures while configuring the outbound multicast interface (`IP_MULTICAST_IF` /
+`IPV6_MULTICAST_IF`) are surfaced as `UDPError.multicastError`: `start()` closes
+the channel and throws rather than silently returning a transport that cannot
+deliver multicast traffic.
 
 ## Performance
 
@@ -285,10 +315,10 @@ Benchmark results on Apple Silicon (M-series):
 └─────────┘                  └────┬─────┘
                                   │ bound
                                   ▼
-┌─────────┐     stop()      ┌──────────┐
+┌─────────┐   shutdown()    ┌──────────┐
 │ stopped │ ◄─────────────── │ started  │
 └─────────┘                  └────┬─────┘
-     ▲                            │ stop()
+     ▲                            │ shutdown()
      │                            ▼
      │                       ┌──────────┐
      └─────────────────────── │ stopping │
@@ -305,7 +335,7 @@ Benchmark results on Apple Silicon (M-series):
 
 ## Test Coverage
 
-67 tests across 7 test suites:
+70 tests across 7 test suites:
 
 | Suite | Tests | Coverage |
 |-------|-------|----------|
@@ -315,7 +345,7 @@ Benchmark results on Apple Silicon (M-series):
 | Multicast | 9 | Join/leave/send for IPv4 and IPv6 |
 | ByteBuffer API | 4 | Zero-copy send/receive |
 | NIOUDPTransport | 13 | Core functionality |
-| Benchmarks | 13 | Performance validation |
+| Benchmarks | 16 | Performance validation |
 
 Run tests:
 ```bash
