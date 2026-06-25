@@ -16,9 +16,10 @@ Cross-platform UDP transport library built on SwiftNIO, providing both unicast a
 │                    UDPTransport (protocol)                   │
 │  ┌─────────────────────────────────────────────────────────┐│
 │  │ send(_ data: Data, to: SocketAddress) async throws      ││
-│  │ incomingDatagrams: AsyncStream<(Data, SocketAddress)>   ││
+│  │ send(_ buffer: ByteBuffer, to: SocketAddress) async ...  ││
+│  │ incomingDatagrams: AsyncStream<IncomingDatagram>        ││
 │  │ start() async throws                                     ││
-│  │ stop() async                                             ││
+│  │ shutdown() async throws                                  ││
 │  └─────────────────────────────────────────────────────────┘│
 └─────────────────────────────┬───────────────────────────────┘
                               │ implements
@@ -26,7 +27,7 @@ Cross-platform UDP transport library built on SwiftNIO, providing both unicast a
 │                  NIOUDPTransport (class)                     │
 │  ┌─────────────────────────────────────────────────────────┐│
 │  │ DatagramBootstrap                                        ││
-│  │ + MulticastSupport                                       ││
+│  │ + MulticastCapable                                       ││
 │  │ + async/await wrapper                                    ││
 │  └─────────────────────────────────────────────────────────┘│
 └─────────────────────────────┬───────────────────────────────┘
@@ -45,12 +46,11 @@ swift-nio-udp/
 ├── DESIGN.md
 ├── Sources/
 │   └── NIOUDPTransport/
-│       ├── UDPTransport.swift         # Protocol定義
-│       ├── NIOUDPTransport.swift      # SwiftNIO実装
-│       ├── UDPConfiguration.swift     # 設定
-│       ├── UDPError.swift             # エラー型
-│       ├── MulticastSupport.swift     # マルチキャスト拡張
-│       └── AddressHelpers.swift       # アドレス変換ユーティリティ
+│       ├── UDPTransport.swift         # Protocol definitions
+│       ├── NIOUDPTransport.swift      # SwiftNIO implementation (incl. multicast)
+│       ├── UDPConfiguration.swift     # Configuration
+│       ├── UDPError.swift             # Error type
+│       └── AddressHelpers.swift       # Address conversion utilities
 │
 └── Tests/
     └── NIOUDPTransportTests/
@@ -77,7 +77,7 @@ public protocol UDPTransport: Sendable {
 
     /// Stream of incoming datagrams.
     ///
-    /// Each element is a tuple of (data, sender address).
+    /// Each element carries the received bytes and the sender address.
     var incomingDatagrams: AsyncStream<IncomingDatagram> { get }
 
     /// Sends data to the specified address.
@@ -88,25 +88,42 @@ public protocol UDPTransport: Sendable {
     /// - Throws: `UDPError` if the send fails
     func send(_ data: Data, to address: SocketAddress) async throws
 
+    /// Sends a ByteBuffer to the specified address (zero-copy).
+    ///
+    /// - Parameters:
+    ///   - buffer: The buffer to send
+    ///   - address: The destination address
+    /// - Throws: `UDPError` if the send fails
+    func send(_ buffer: ByteBuffer, to address: SocketAddress) async throws
+
     /// Starts the transport.
     ///
     /// Binds to the configured address and begins receiving datagrams.
     func start() async throws
 
-    /// Stops the transport.
+    /// Shuts the transport down.
     ///
     /// Closes the socket and stops receiving datagrams.
-    func stop() async
+    func shutdown() async throws
 }
 
-/// An incoming datagram with data and sender address.
+/// An incoming datagram with its bytes and sender address.
 public struct IncomingDatagram: Sendable {
-    public let data: Data
+    /// The received data as ByteBuffer (zero-copy from NIO).
+    public let buffer: ByteBuffer
+
+    /// The remote address that sent this datagram.
     public let remoteAddress: SocketAddress
 
-    public init(data: Data, remoteAddress: SocketAddress) {
-        self.data = data
+    public init(buffer: ByteBuffer, remoteAddress: SocketAddress) {
+        self.buffer = buffer
         self.remoteAddress = remoteAddress
+    }
+
+    /// The received data as Data (convenience, copies bytes).
+    @inlinable
+    public var data: Data {
+        Data(buffer: buffer)
     }
 }
 ```
@@ -150,6 +167,18 @@ public protocol MulticastCapable: UDPTransport {
         to group: String,
         port: Int
     ) async throws
+
+    /// Sends a ByteBuffer to a multicast group (zero-copy).
+    ///
+    /// - Parameters:
+    ///   - buffer: The buffer to send
+    ///   - group: The multicast group address
+    ///   - port: The destination port
+    func sendMulticast(
+        _ buffer: ByteBuffer,
+        to group: String,
+        port: Int
+    ) async throws
 }
 ```
 
@@ -160,25 +189,28 @@ public protocol MulticastCapable: UDPTransport {
 public struct UDPConfiguration: Sendable {
 
     /// The address to bind to.
-    public var bindAddress: BindAddress
+    public let bindAddress: BindAddress
 
     /// Whether to enable address reuse (SO_REUSEADDR).
-    public var reuseAddress: Bool
+    public let reuseAddress: Bool
 
     /// Whether to enable port reuse (SO_REUSEPORT).
-    public var reusePort: Bool
+    public let reusePort: Bool
 
     /// Receive buffer size in bytes.
-    public var receiveBufferSize: Int
+    public let receiveBufferSize: Int
 
     /// Send buffer size in bytes.
-    public var sendBufferSize: Int
+    public let sendBufferSize: Int
 
     /// Maximum datagram size.
-    public var maxDatagramSize: Int
+    public let maxDatagramSize: Int
 
     /// Network interface to bind to (nil for all interfaces).
-    public var networkInterface: String?
+    public let networkInterface: String?
+
+    /// Buffering capacity of the incoming-datagram AsyncStream.
+    public let streamBufferSize: Int
 
     public enum BindAddress: Sendable {
         /// Bind to any address on the specified port.
@@ -203,7 +235,8 @@ public struct UDPConfiguration: Sendable {
             receiveBufferSize: 65536,
             sendBufferSize: 65536,
             maxDatagramSize: 65507,
-            networkInterface: nil
+            networkInterface: nil,
+            streamBufferSize: 100
         )
     }
 
@@ -216,7 +249,8 @@ public struct UDPConfiguration: Sendable {
             receiveBufferSize: 65536,
             sendBufferSize: 65536,
             maxDatagramSize: 65507,
-            networkInterface: nil
+            networkInterface: nil,
+            streamBufferSize: 200
         )
     }
 }
@@ -226,6 +260,8 @@ public struct UDPConfiguration: Sendable {
 
 ```swift
 /// Errors that can occur during UDP operations.
+///
+/// Conforms to `CustomStringConvertible` for human-readable descriptions.
 public enum UDPError: Error, Sendable {
     /// Transport is not started.
     case notStarted
@@ -239,6 +275,9 @@ public enum UDPError: Error, Sendable {
     /// Failed to send datagram.
     case sendFailed(underlying: Error)
 
+    /// A batch send partially or fully failed.
+    case batchSendFailed(failedCount: Int, total: Int, firstError: Error)
+
     /// Invalid address format.
     case invalidAddress(String)
 
@@ -251,8 +290,18 @@ public enum UDPError: Error, Sendable {
     /// Channel closed unexpectedly.
     case channelClosed
 
+    /// Failed to shut the transport down.
+    case shutdownFailed(underlying: Error)
+
     /// Operation timed out.
     case timeout
+
+    /// The supplied configuration is invalid.
+    case invalidConfiguration(String)
+}
+
+extension UDPError: CustomStringConvertible {
+    public var description: String { /* human-readable per case */ }
 }
 ```
 
@@ -264,21 +313,31 @@ import NIOPosix
 import Synchronization
 
 /// SwiftNIO-based UDP transport implementation.
-public final class NIOUDPTransport: UDPTransport, MulticastCapable, Sendable {
+public final class NIOUDPTransport: UDPTransport, MulticastCapable, @unchecked Sendable {
 
     private let configuration: UDPConfiguration
     private let eventLoopGroup: EventLoopGroup
     private let ownsEventLoopGroup: Bool
 
     private let state: Mutex<State>
-    private let incomingContinuation: Mutex<AsyncStream<IncomingDatagram>.Continuation?>
+    private let incomingContinuation: AsyncStream<IncomingDatagram>.Continuation
 
     public let incomingDatagrams: AsyncStream<IncomingDatagram>
 
-    private struct State: Sendable {
-        var channel: Channel?
-        var isStarted: Bool = false
+    private struct State {
+        var channel: (any Channel)?
+        var status: Status = .initial
+        var generation: UInt64 = 0
         var joinedGroups: Set<String> = []
+        var deviceCache: [String: NIONetworkDevice] = [:]
+
+        enum Status {
+            case initial
+            case starting
+            case started
+            case stopping
+            case stopped
+        }
     }
 
     // MARK: - Initialization
@@ -305,10 +364,12 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, Sendable {
         self.state = Mutex(State())
 
         var continuation: AsyncStream<IncomingDatagram>.Continuation!
-        self.incomingDatagrams = AsyncStream { cont in
+        self.incomingDatagrams = AsyncStream(
+            bufferingPolicy: .bufferingNewest(configuration.streamBufferSize)
+        ) { cont in
             continuation = cont
         }
-        self.incomingContinuation = Mutex(continuation)
+        self.incomingContinuation = continuation
     }
 
     deinit {
@@ -327,8 +388,9 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, Sendable {
 
     public func start() async throws {
         let alreadyStarted = state.withLock { state in
-            if state.isStarted { return true }
-            state.isStarted = true
+            if state.status == .started || state.status == .starting { return true }
+            state.status = .starting
+            state.generation &+= 1
             return false
         }
 
@@ -338,50 +400,69 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, Sendable {
 
         do {
             let channel = try await createChannel()
-            state.withLock { $0.channel = channel }
+            state.withLock {
+                $0.channel = channel
+                $0.status = .started
+            }
         } catch {
-            state.withLock { $0.isStarted = false }
+            state.withLock { $0.status = .stopped }
             throw UDPError.bindFailed(underlying: error)
         }
     }
 
-    public func stop() async {
+    public func shutdown() async throws {
         let channel = state.withLock { state in
-            state.isStarted = false
+            state.status = .stopping
             let ch = state.channel
             state.channel = nil
             state.joinedGroups.removeAll()
+            state.deviceCache.removeAll()
             return ch
         }
 
         if let channel {
-            try? await channel.close()
+            try await channel.close()
         }
 
-        incomingContinuation.withLock { $0?.finish() }
+        incomingContinuation.finish()
+
+        state.withLock { $0.status = .stopped }
 
         if ownsEventLoopGroup {
-            try? await eventLoopGroup.shutdownGracefully()
+            try await eventLoopGroup.shutdownGracefully()
         }
     }
 
     public func send(_ data: Data, to address: SocketAddress) async throws {
+        let buffer = ByteBuffer.from(data, allocator: ByteBufferAllocator())
+        try await send(buffer, to: address)
+    }
+
+    public func send(_ buffer: ByteBuffer, to address: SocketAddress) async throws {
         guard let channel = state.withLock({ $0.channel }) else {
             throw UDPError.notStarted
         }
 
-        guard data.count <= configuration.maxDatagramSize else {
+        guard buffer.readableBytes <= configuration.maxDatagramSize else {
             throw UDPError.datagramTooLarge(
-                size: data.count,
+                size: buffer.readableBytes,
                 max: configuration.maxDatagramSize
             )
         }
 
-        let buffer = channel.allocator.buffer(data: data)
         let envelope = AddressedEnvelope(remoteAddress: address, data: buffer)
-
         try await channel.writeAndFlush(envelope)
     }
+
+    /// Sends a batch of buffered datagrams, reporting partial failures.
+    public func sendBatch(
+        _ datagrams: [(ByteBuffer, SocketAddress)]
+    ) async throws { /* ... aggregates failures into UDPError.batchSendFailed ... */ }
+
+    /// Sends a batch of Data datagrams (convenience overload).
+    public func sendBatch(
+        _ datagrams: [(Data, SocketAddress)]
+    ) async throws { /* ... */ }
 
     // MARK: - MulticastCapable
 
@@ -463,6 +544,15 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, Sendable {
         try await send(data, to: address)
     }
 
+    public func sendMulticast(
+        _ buffer: ByteBuffer,
+        to group: String,
+        port: Int
+    ) async throws {
+        let address = try SocketAddress(ipAddress: group, port: port)
+        try await send(buffer, to: address)
+    }
+
     // MARK: - Private
 
     private func createChannel() async throws -> Channel {
@@ -496,7 +586,7 @@ public final class NIOUDPTransport: UDPTransport, MulticastCapable, Sendable {
 
     /// Called by DatagramHandler when a datagram is received.
     fileprivate func handleIncomingDatagram(_ datagram: IncomingDatagram) {
-        incomingContinuation.withLock { $0?.yield(datagram) }
+        incomingContinuation.yield(datagram)
     }
 }
 
@@ -513,13 +603,11 @@ private final class DatagramHandler: ChannelInboundHandler {
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let envelope = unwrapInboundIn(data)
-        let buffer = envelope.data
 
-        // Convert ByteBuffer to Data
-        let data = Data(buffer: buffer)
-
+        // Keep the NIO ByteBuffer (zero-copy); `data` is exposed as a
+        // convenience computed property on IncomingDatagram.
         let datagram = IncomingDatagram(
-            data: data,
+            buffer: envelope.data,
             remoteAddress: envelope.remoteAddress
         )
 
@@ -549,6 +637,16 @@ extension SocketAddress {
         try self.init(ipAddress: String(parts[0]), port: port)
     }
 
+    /// Returns a cached SocketAddress for a "host:port" string, parsing and
+    /// caching on first use (bounded cache).
+    public static func cached(hostPort: String) throws -> SocketAddress
+
+    /// Clears the address cache used by `cached(hostPort:)`.
+    public static func clearCache()
+
+    /// The IP address portion of this socket address, if any.
+    public var host: String? { self.ipAddress }
+
     /// Returns the address as "host:port" string.
     public var hostPortString: String? {
         switch self {
@@ -564,20 +662,21 @@ extension SocketAddress {
     }
 }
 
+extension ByteBuffer {
+    /// Builds a ByteBuffer from Data using the given allocator.
+    @inlinable
+    public static func from(_ data: Data, allocator: ByteBufferAllocator) -> ByteBuffer {
+        var buffer = allocator.buffer(capacity: data.count)
+        buffer.writeBytes(data)
+        return buffer
+    }
+}
+
 extension Data {
     /// Creates Data from a ByteBuffer.
     init(buffer: ByteBuffer) {
         var buffer = buffer
         self = buffer.readData(length: buffer.readableBytes) ?? Data()
-    }
-}
-
-extension ByteBufferAllocator {
-    /// Allocates a buffer containing the given Data.
-    func buffer(data: Data) -> ByteBuffer {
-        var buffer = self.buffer(capacity: data.count)
-        buffer.writeBytes(data)
-        return buffer
     }
 }
 ```
@@ -610,8 +709,8 @@ Task {
 let address = try SocketAddress(ipAddress: "192.168.1.10", port: 7946)
 try await transport.send(Data("Hello".utf8), to: address)
 
-// Stop
-await transport.stop()
+// Shut down
+try await transport.shutdown()
 ```
 
 ### Multicast (mDNS)
@@ -642,7 +741,7 @@ try await transport.sendMulticast(dnsQuery, to: "224.0.0.251", port: 5353)
 
 // Cleanup
 try await transport.leaveMulticastGroup("224.0.0.251", on: nil)
-await transport.stop()
+try await transport.shutdown()
 ```
 
 ### Shared EventLoopGroup
@@ -780,7 +879,7 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.79.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.92.0"),
     ],
     targets: [
         .target(

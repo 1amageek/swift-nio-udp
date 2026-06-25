@@ -329,7 +329,7 @@ Benchmark results on Apple Silicon (M-series):
 
 | Component | Mechanism | Reason |
 |-----------|-----------|--------|
-| `NIOUDPTransport` | `final class` + `Mutex` | High-frequency state access |
+| `NIOUDPTransport` | `final class` + `Mutex`, `@unchecked Sendable` | High-frequency state access |
 | Internal state | `Mutex<State>` | Synchronized mutable state |
 | Continuation flag | `Atomic<Bool>` | Lock-free termination check |
 
