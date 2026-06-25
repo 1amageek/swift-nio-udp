@@ -27,7 +27,8 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],
-            path: "Sources/NIOUDPTransport"
+            path: "Sources/NIOUDPTransport",
+            exclude: ["CONTEXT.md"]
         ),
         .testTarget(
             name: "NIOUDPTransportTests",

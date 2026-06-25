@@ -2,6 +2,8 @@
 
 A high-performance UDP transport layer built on SwiftNIO with support for unicast and multicast communication.
 
+> **Release status.** The released `1.1.2` ships the prior API. The Embedded-first API documented across the wider stack lives on the unreleased `embedded` branches (M8 pending) and is not tagged — pin to the branch to use it. The Embedded P2P stack consumes this package via a local `path:` reference on those branches; host consumers use the released `1.1.2` tag.
+
 ## Features
 
 - **SwiftNIO Integration** - Built on Apple's SwiftNIO for efficient, non-blocking I/O
@@ -287,6 +289,12 @@ Benchmark results on Apple Silicon (M-series):
 
 ## Architecture
 
+`NIOUDPTransport` implements the `UDPTransport` (+ `MulticastCapable`)
+protocol over SwiftNIO's `DatagramBootstrap`, exposing a plain async/await
+surface. It is the transport layer used by higher-level protocols such as
+swift-mDNS and swift-SWIM, and by the P2P stack's `P2PTransportNIO` adapter,
+which conforms it to that stack's `DatagramTransport` seam.
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     NIOUDPTransport                         │
@@ -325,7 +333,7 @@ Benchmark results on Apple Silicon (M-series):
                               └──────────┘
 ```
 
-## Thread Safety
+### Thread Safety
 
 | Component | Mechanism | Reason |
 |-----------|-----------|--------|
@@ -333,7 +341,13 @@ Benchmark results on Apple Silicon (M-series):
 | Internal state | `Mutex<State>` | Synchronized mutable state |
 | Continuation flag | `Atomic<Bool>` | Lock-free termination check |
 
-## Test Coverage
+`@unchecked Sendable` is required because `State` stores non-Sendable
+SwiftNIO values (`any Channel`, `NIONetworkDevice`); they are never exposed
+directly and every access funnels through `Mutex<State>`. See
+[`Sources/NIOUDPTransport/CONTEXT.md`](Sources/NIOUDPTransport/CONTEXT.md) for
+the start/shutdown lifecycle and the load-bearing concurrency invariants.
+
+## Testing
 
 70 tests across 7 test suites:
 
