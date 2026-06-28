@@ -2,7 +2,7 @@
 
 A high-performance UDP transport layer built on SwiftNIO with support for unicast and multicast communication.
 
-> **Release status.** The released `1.1.2` ships the prior API. The Embedded-first API documented across the wider stack lives on the unreleased `embedded` branches (M8 pending) and is not tagged — pin to the branch to use it. The Embedded P2P stack consumes this package via a local `path:` reference on those branches; host consumers use the released `1.1.2` tag.
+> **Release status.** Current release: `1.1.4`.
 
 ## Features
 
@@ -24,7 +24,7 @@ Add swift-nio-udp to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.2")
+    .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.4")
 ]
 ```
 
