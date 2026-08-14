@@ -1,27 +1,44 @@
-/// NIOUDPTransport Benchmark Tests
+/// NIOUDPTransport benchmark command.
 ///
 /// Performance benchmarks for UDP transport operations.
 
-import Testing
 import Foundation
 import NIOCore
 import NIOPosix
 import Synchronization
-@testable import NIOUDPTransport
+import NIOUDPTransport
 
-@Suite("Benchmark Tests")
-struct BenchmarkTests {
+private let benchmarkSink = Mutex(0)
+
+@main
+enum NIOUDPTransportBenchmarkCommand {
+    static func main() async throws {
+        let benchmarks = Benchmarks()
+        try benchmarks.benchmarkParseIPv4()
+        try benchmarks.benchmarkParseIPv6()
+        try benchmarks.benchmarkHostPortString()
+        try await benchmarks.benchmarkLoopbackSend()
+        try await benchmarks.benchmarkLoopbackDelivery()
+        try await benchmarks.benchmarkBatchSend10()
+        try await benchmarks.benchmarkBatchVsSingle()
+        try benchmarks.benchmarkAddressCache()
+    }
+}
+
+private struct Benchmarks {
 
     // MARK: - Address Parsing Benchmarks
 
-    @Test("Benchmark: Parse IPv4 address")
     func benchmarkParseIPv4() throws {
         let iterations = 100_000
         let start = ContinuousClock.now
+        var checksum = 0
 
         for _ in 0..<iterations {
-            _ = try SocketAddress(hostPort: "192.168.1.100:7946")
+            let address = try SocketAddress(hostPort: "192.168.1.100:7946")
+            checksum &+= address.port ?? 0
         }
+        benchmarkSink.withLock { $0 = checksum }
 
         let elapsed = ContinuousClock.now - start
         let perIteration = elapsed / iterations
@@ -30,14 +47,16 @@ struct BenchmarkTests {
         print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) ops/sec")
     }
 
-    @Test("Benchmark: Parse IPv6 address")
     func benchmarkParseIPv6() throws {
         let iterations = 100_000
         let start = ContinuousClock.now
+        var checksum = 0
 
         for _ in 0..<iterations {
-            _ = try SocketAddress(hostPort: "[::1]:7946")
+            let address = try SocketAddress(hostPort: "[::1]:7946")
+            checksum &+= address.port ?? 0
         }
+        benchmarkSink.withLock { $0 = checksum }
 
         let elapsed = ContinuousClock.now - start
         let perIteration = elapsed / iterations
@@ -46,16 +65,19 @@ struct BenchmarkTests {
         print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) ops/sec")
     }
 
-    @Test("Benchmark: hostPortString generation")
     func benchmarkHostPortString() throws {
         let address = try SocketAddress(ipAddress: "192.168.1.100", port: 7946)
-
         let iterations = 100_000
         let start = ContinuousClock.now
+        var checksum = 0
 
         for _ in 0..<iterations {
-            _ = address.hostPortString
+            guard let hostPortString = address.hostPortString else {
+                throw BenchmarkError.missingHostPortString
+            }
+            checksum &+= hostPortString.count
         }
+        benchmarkSink.withLock { $0 = checksum }
 
         let elapsed = ContinuousClock.now - start
         let perIteration = elapsed / iterations
@@ -64,169 +86,8 @@ struct BenchmarkTests {
         print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) ops/sec")
     }
 
-    // MARK: - ByteBuffer Benchmarks
-
-    @Test("Benchmark: ByteBuffer write bytes")
-    func benchmarkByteBufferWrite() {
-        let allocator = ByteBufferAllocator()
-        let testData = Data(repeating: 0x42, count: 512)
-
-        let iterations = 100_000
-        let start = ContinuousClock.now
-
-        for _ in 0..<iterations {
-            var buffer = allocator.buffer(capacity: 512)
-            buffer.writeBytes(testData)
-        }
-
-        let elapsed = ContinuousClock.now - start
-        let perIteration = elapsed / iterations
-
-        print("ByteBuffer write 512 bytes: \(perIteration) per iteration (\(iterations) iterations)")
-        print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) ops/sec")
-    }
-
-    @Test("Benchmark: ByteBuffer to Data conversion")
-    func benchmarkByteBufferToData() {
-        let allocator = ByteBufferAllocator()
-        var buffer = allocator.buffer(capacity: 512)
-        buffer.writeBytes(Data(repeating: 0x42, count: 512))
-
-        let iterations = 100_000
-        let start = ContinuousClock.now
-
-        for _ in 0..<iterations {
-            _ = Data(buffer: buffer)
-        }
-
-        let elapsed = ContinuousClock.now - start
-        let perIteration = elapsed / iterations
-
-        print("ByteBuffer to Data (512 bytes): \(perIteration) per iteration (\(iterations) iterations)")
-        print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) ops/sec")
-    }
-
-    @Test("Benchmark: ByteBuffer withUnsafeReadableBytes")
-    func benchmarkByteBufferUnsafeRead() {
-        let allocator = ByteBufferAllocator()
-        var buffer = allocator.buffer(capacity: 512)
-        buffer.writeBytes(Data(repeating: 0x42, count: 512))
-
-        let iterations = 100_000
-        let start = ContinuousClock.now
-
-        for _ in 0..<iterations {
-            buffer.withUnsafeReadableBytes { ptr in
-                _ = ptr.count
-            }
-        }
-
-        let elapsed = ContinuousClock.now - start
-        let perIteration = elapsed / iterations
-
-        print("ByteBuffer withUnsafeReadableBytes: \(perIteration) per iteration (\(iterations) iterations)")
-        print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) ops/sec")
-    }
-
-    // MARK: - Atomic vs Mutex Benchmarks
-
-    @Test("Benchmark: Atomic Bool load")
-    func benchmarkAtomicBoolLoad() {
-        let atomic = Atomic<Bool>(false)
-
-        let iterations = 1_000_000
-        let start = ContinuousClock.now
-
-        for _ in 0..<iterations {
-            _ = atomic.load(ordering: .acquiring)
-        }
-
-        let elapsed = ContinuousClock.now - start
-        let perIteration = elapsed / iterations
-
-        print("Atomic Bool load: \(perIteration) per iteration (\(iterations) iterations)")
-        print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) ops/sec")
-    }
-
-    @Test("Benchmark: Mutex withLock")
-    func benchmarkMutexWithLock() {
-        let mutex = Mutex<Bool>(false)
-
-        let iterations = 1_000_000
-        let start = ContinuousClock.now
-
-        for _ in 0..<iterations {
-            mutex.withLock { _ = $0 }
-        }
-
-        let elapsed = ContinuousClock.now - start
-        let perIteration = elapsed / iterations
-
-        print("Mutex withLock: \(perIteration) per iteration (\(iterations) iterations)")
-        print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) ops/sec")
-    }
-
-    @Test("Benchmark: Atomic vs Mutex comparison")
-    func benchmarkAtomicVsMutex() {
-        let atomic = Atomic<Bool>(false)
-        let mutex = Mutex<Bool>(false)
-
-        let iterations = 500_000
-
-        // Benchmark Atomic
-        let startAtomic = ContinuousClock.now
-        for _ in 0..<iterations {
-            if !atomic.load(ordering: .acquiring) {
-                // simulate work
-            }
-        }
-        let elapsedAtomic = ContinuousClock.now - startAtomic
-
-        // Benchmark Mutex
-        let startMutex = ContinuousClock.now
-        for _ in 0..<iterations {
-            mutex.withLock { val in
-                if !val {
-                    // simulate work
-                }
-            }
-        }
-        let elapsedMutex = ContinuousClock.now - startMutex
-
-        print("Atomic check: \(elapsedAtomic / iterations) per iteration")
-        print("Mutex check: \(elapsedMutex / iterations) per iteration")
-        print("Speedup: \(elapsedMutex.totalSeconds / elapsedAtomic.totalSeconds)x")
-    }
-
-    // MARK: - AsyncStream Benchmarks
-
-    @Test("Benchmark: AsyncStream yield")
-    func benchmarkAsyncStreamYield() async {
-        var continuation: AsyncStream<Int>.Continuation!
-        let stream = AsyncStream<Int>(bufferingPolicy: .bufferingNewest(100)) { cont in
-            continuation = cont
-        }
-
-        let iterations = 100_000
-        let start = ContinuousClock.now
-
-        for i in 0..<iterations {
-            _ = continuation.yield(i)
-        }
-
-        let elapsed = ContinuousClock.now - start
-        let perIteration = elapsed / iterations
-
-        continuation.finish()
-        _ = stream  // Keep stream alive
-
-        print("AsyncStream yield: \(perIteration) per iteration (\(iterations) iterations)")
-        print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) ops/sec")
-    }
-
     // MARK: - Loopback Throughput Benchmarks
 
-    @Test("Benchmark: Loopback send throughput")
     func benchmarkLoopbackSend() async throws {
         let config = UDPConfiguration(
             bindAddress: .specific(host: "127.0.0.1", port: 0),
@@ -262,20 +123,20 @@ struct BenchmarkTests {
 
         try await transport.shutdown()
 
-        print("Loopback send (256 bytes): \(perIteration) per iteration (\(iterations) iterations)")
+        print("Loopback send submission (256 bytes): \(perIteration) per iteration (\(iterations) iterations)")
         print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) datagrams/sec")
         print("  Data throughput: \(String(format: "%.2f", throughputMBps)) MB/sec")
     }
 
-    @Test("Benchmark: Loopback send/receive round-trip")
-    func benchmarkLoopbackRoundTrip() async throws {
+    func benchmarkLoopbackDelivery() async throws {
         let config1 = UDPConfiguration(
             bindAddress: .specific(host: "127.0.0.1", port: 0),
             reuseAddress: true
         )
         let config2 = UDPConfiguration(
             bindAddress: .specific(host: "127.0.0.1", port: 0),
-            reuseAddress: true
+            reuseAddress: true,
+            streamBufferSize: 8_192
         )
 
         let sender = NIOUDPTransport(configuration: config1)
@@ -326,40 +187,22 @@ struct BenchmarkTests {
         receiveTask.cancel()
         try await sender.shutdown()
         try await receiver.shutdown()
+        _ = await receiveTask.result
+
+        guard received == iterations else {
+            throw BenchmarkError.incompleteReceive(expected: iterations, actual: received)
+        }
 
         let perIteration = elapsed / iterations
         let lossRate = Double(iterations - received) / Double(iterations) * 100
 
-        print("Loopback round-trip (128 bytes): \(perIteration) per iteration (\(iterations) iterations)")
+        print("Loopback delivery (128 bytes): \(perIteration) per iteration (\(iterations) iterations)")
         print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) datagrams/sec")
         print("  Received: \(received)/\(iterations) (loss: \(String(format: "%.2f", lossRate))%)")
     }
 
-    // MARK: - Configuration Benchmarks
-
-    @Test("Benchmark: UDPConfiguration creation")
-    func benchmarkConfigCreation() {
-        let iterations = 100_000
-        let start = ContinuousClock.now
-
-        for i in 0..<iterations {
-            _ = UDPConfiguration(
-                bindAddress: .specific(host: "127.0.0.1", port: 8000 + (i % 1000)),
-                reuseAddress: true,
-                reusePort: false
-            )
-        }
-
-        let elapsed = ContinuousClock.now - start
-        let perIteration = elapsed / iterations
-
-        print("UDPConfiguration creation: \(perIteration) per iteration (\(iterations) iterations)")
-        print("  Throughput: \(Double(iterations) / elapsed.totalSeconds) ops/sec")
-    }
-
     // MARK: - Batch Send Benchmarks
 
-    @Test("Benchmark: Batch send throughput (10 packets)")
     func benchmarkBatchSend10() async throws {
         let config = UDPConfiguration(
             bindAddress: .specific(host: "127.0.0.1", port: 0),
@@ -409,7 +252,6 @@ struct BenchmarkTests {
         print("  Data throughput: \(String(format: "%.2f", throughputMBps)) MB/sec")
     }
 
-    @Test("Benchmark: Batch send vs single send (comparison)")
     func benchmarkBatchVsSingle() async throws {
         let config = UDPConfiguration(
             bindAddress: .specific(host: "127.0.0.1", port: 0),
@@ -463,14 +305,15 @@ struct BenchmarkTests {
         print("Speedup: \(String(format: "%.2f", batchMBps / singleMBps))x")
     }
 
-    @Test("Benchmark: SocketAddress.cached() performance")
     func benchmarkAddressCache() throws {
         let iterations = 100_000
 
         // Benchmark uncached parsing
         let startUncached = ContinuousClock.now
+        var checksum = 0
         for _ in 0..<iterations {
-            _ = try SocketAddress(hostPort: "192.168.1.100:7946")
+            let address = try SocketAddress(hostPort: "192.168.1.100:7946")
+            checksum &+= address.port ?? 0
         }
         let elapsedUncached = ContinuousClock.now - startUncached
 
@@ -483,9 +326,11 @@ struct BenchmarkTests {
         // Benchmark cached access
         let startCached = ContinuousClock.now
         for _ in 0..<iterations {
-            _ = try SocketAddress.cached(hostPort: "192.168.1.100:7946")
+            let address = try SocketAddress.cached(hostPort: "192.168.1.100:7946")
+            checksum &+= address.port ?? 0
         }
         let elapsedCached = ContinuousClock.now - startCached
+        benchmarkSink.withLock { $0 = checksum }
 
         let uncachedPerOp = elapsedUncached / iterations
         let cachedPerOp = elapsedCached / iterations
@@ -494,6 +339,11 @@ struct BenchmarkTests {
         print("SocketAddress cached:   \(cachedPerOp) per operation")
         print("Speedup: \(String(format: "%.1f", elapsedUncached.totalSeconds / elapsedCached.totalSeconds))x")
     }
+}
+
+private enum BenchmarkError: Error {
+    case incompleteReceive(expected: Int, actual: Int)
+    case missingHostPortString
 }
 
 // MARK: - Duration Helper

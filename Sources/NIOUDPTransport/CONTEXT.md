@@ -1,6 +1,6 @@
 # NIOUDPTransport — CONTEXT
-Scope/role: the SwiftNIO-backed `UDPTransport` / `MulticastCapable` implementation and its lifecycle/concurrency invariants. Depended on by swift-mDNS, swift-SWIM, and the P2P stack's `P2PTransportNIO` adapter.
-Last reviewed: 2026-06-25
+Scope/role: the SwiftNIO-backed `UDPTransport` / `MulticastCapable` implementation and its lifecycle/concurrency invariants. Used directly by host adapters in swift-SWIM and swift-libp2p; it is not a module inside swift-networking.
+Last reviewed: 2026-08-13
 
 `NIOUDPTransport` is a reference type that owns mutable NIO state behind a
 single `Mutex<State>`. Read this before touching `start()`, `shutdown()`, the
@@ -47,8 +47,10 @@ can reintroduce a use-after-shutdown, a double-finish, or a leaked channel.
 
 ## Build
 ```bash
-# Host build + tests (default toolchain)
-swift build
-swift test
+# Host tests (pinned Swift 6.4 development snapshot)
+TOOLCHAINS=org.swift.64202607231a \
+  xcodebuild test \
+  -scheme swift-nio-udp \
+  -destination 'platform=macOS'
 ```
 This module is host-only (SwiftNIO is not Embedded); there is no Embedded build.

@@ -33,6 +33,7 @@ Packages/
 # Test outputs
 *.xcresult/
 coverage/
+.test-artifacts/
 
 # Benchmarks
 Benchmarks/.build/

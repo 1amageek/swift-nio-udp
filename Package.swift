@@ -2,6 +2,8 @@
 
 import PackageDescription
 
+let includesBenchmarks = Context.environment["SWIFT_NIO_UDP_ENABLE_BENCHMARKS"] == "1"
+
 let package = Package(
     name: "swift-nio-udp",
     platforms: [
@@ -35,5 +37,15 @@ let package = Package(
             dependencies: ["NIOUDPTransport"],
             path: "Tests/NIOUDPTransportTests"
         ),
-    ]
+    ] + (includesBenchmarks ? [
+        .executableTarget(
+            name: "NIOUDPTransportBenchmarks",
+            dependencies: [
+                "NIOUDPTransport",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ],
+            path: "Benchmarks/NIOUDPTransportBenchmarks"
+        ),
+    ] : [])
 )

@@ -2,7 +2,7 @@
 
 A high-performance UDP transport layer built on SwiftNIO with support for unicast and multicast communication.
 
-> **Release status.** Current release: `1.1.4`.
+> **Release status.** Current release: `1.1.5`.
 
 ## Features
 
@@ -11,7 +11,7 @@ A high-performance UDP transport layer built on SwiftNIO with support for unicas
 - **Zero-Copy** - Direct ByteBuffer integration for minimal memory copies
 - **Modern Swift** - Uses Swift 6 concurrency with Mutex and Sendable types
 - **AsyncStream** - Incoming datagrams delivered via AsyncStream with configurable buffering
-- **Comprehensive Testing** - 70 tests covering functionality, error handling, and performance
+- **Comprehensive Testing** - 54 correctness tests covering functionality and error handling
 
 ## Requirements
 
@@ -24,7 +24,7 @@ Add swift-nio-udp to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.4")
+    .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.5")
 ]
 ```
 
@@ -274,26 +274,35 @@ deliver multicast traffic.
 
 ## Performance
 
-Benchmark results on Apple Silicon (M-series):
+Benchmarks are an opt-in executable, separate from ordinary correctness tests.
+The loopback lanes measure real UDP send submission and one-way delivery; they
+do not label one-way traffic as a round trip.
 
-| Operation | Throughput |
-|-----------|------------|
-| Atomic Bool load | 424M ops/sec |
-| Mutex withLock | 208M ops/sec |
-| Configuration creation | 21.9M ops/sec |
-| ByteBuffer read | 6.5M ops/sec |
-| AsyncStream yield | 1.86M ops/sec |
-| Address parsing | ~590K ops/sec |
-| Loopback round-trip | 21K datagrams/sec |
-| Loopback throughput | 5.26 MB/sec |
+```bash
+SWIFT_NIO_UDP_ENABLE_BENCHMARKS=1 \
+  TOOLCHAINS=org.swift.64202607231a \
+  swift run -c release -debug-info-format none NIOUDPTransportBenchmarks
+```
+
+Release snapshot measured on 2026-08-14 with an Apple M4 Max, macOS 27.0,
+and Swift `swift-6.4.x-DEVELOPMENT-SNAPSHOT-2026-07-23-a`. Values are the
+median of three runs:
+
+| Benchmark | Result |
+|---|---:|
+| Loopback send submission, 256 bytes | 27,184 datagrams/s; 6.96 MB/s |
+| Loopback one-way delivery, 128 bytes | 26,802 datagrams/s; 0/5,000 lost |
+| Batch send, 10 x 256 bytes | 37,445 datagrams/s; 9.59 MB/s |
+| Batch vs. individual submission | 1.31x |
+| Cached address lookup vs. parsing | 18.8x |
 
 ## Architecture
 
 `NIOUDPTransport` implements the `UDPTransport` (+ `MulticastCapable`)
 protocol over SwiftNIO's `DatagramBootstrap`, exposing a plain async/await
-surface. It is the transport layer used by higher-level protocols such as
-swift-mDNS and swift-SWIM, and by the P2P stack's `P2PTransportNIO` adapter,
-which conforms it to that stack's `DatagramTransport` seam.
+surface. It is used directly by host-side adapters in swift-SWIM and the P2P
+stack. Protocol-neutral datagram contracts remain in `swift-networking`;
+this package owns only the SwiftNIO-backed UDP implementation.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -349,7 +358,10 @@ the start/shutdown lifecycle and the load-bearing concurrency invariants.
 
 ## Testing
 
-70 tests across 7 test suites:
+Performance benchmarks are not counted as tests and do not run during ordinary
+test invocations.
+
+The release gate runs 54 correctness tests across six suites:
 
 | Suite | Tests | Coverage |
 |-------|-------|----------|
@@ -359,11 +371,13 @@ the start/shutdown lifecycle and the load-bearing concurrency invariants.
 | Multicast | 9 | Join/leave/send for IPv4 and IPv6 |
 | ByteBuffer API | 4 | Zero-copy send/receive |
 | NIOUDPTransport | 13 | Core functionality |
-| Benchmarks | 16 | Performance validation |
 
 Run tests:
 ```bash
-swift test
+TOOLCHAINS=org.swift.64202607231a \
+  xcodebuild test \
+  -scheme swift-nio-udp \
+  -destination 'platform=macOS'
 ```
 
 ## Dependencies
