@@ -3,6 +3,12 @@
 import PackageDescription
 
 let includesBenchmarks = Context.environment["SWIFT_NIO_UDP_ENABLE_BENCHMARKS"] == "1"
+let includesLiveMulticastTests =
+    Context.environment["SWIFT_NIO_UDP_ENABLE_LIVE_MULTICAST_TESTS"] == "1"
+
+let testSettings: [SwiftSetting] = includesLiveMulticastTests
+    ? [.define("SWIFT_NIO_UDP_LIVE_MULTICAST_TESTS")]
+    : []
 
 let package = Package(
     name: "swift-nio-udp",
@@ -35,7 +41,8 @@ let package = Package(
         .testTarget(
             name: "NIOUDPTransportTests",
             dependencies: ["NIOUDPTransport"],
-            path: "Tests/NIOUDPTransportTests"
+            path: "Tests/NIOUDPTransportTests",
+            swiftSettings: testSettings
         ),
     ] + (includesBenchmarks ? [
         .executableTarget(

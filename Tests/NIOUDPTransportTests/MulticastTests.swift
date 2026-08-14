@@ -3,6 +3,12 @@ import Foundation
 import NIOCore
 @testable import NIOUDPTransport
 
+#if SWIFT_NIO_UDP_LIVE_MULTICAST_TESTS
+private let liveMulticastTestsEnabled = true
+#else
+private let liveMulticastTestsEnabled = false
+#endif
+
 @Suite("Multicast Tests")
 struct MulticastTests {
 
@@ -35,7 +41,13 @@ struct MulticastTests {
         try await transport.shutdown()
     }
 
-    @Test("Join IPv6 multicast group")
+    @Test(
+        "Join IPv6 multicast group",
+        .enabled(
+            if: liveMulticastTestsEnabled,
+            "Set SWIFT_NIO_UDP_ENABLE_LIVE_MULTICAST_TESTS=1 on a multicast-capable host"
+        )
+    )
     func joinIPv6MulticastGroup() async throws {
         let config = multicastConfiguration(ipv6: true)
         let transport = NIOUDPTransport(configuration: config)
@@ -64,7 +76,13 @@ struct MulticastTests {
         try await transport.shutdown()
     }
 
-    @Test("Send to multicast group")
+    @Test(
+        "Send to multicast group",
+        .enabled(
+            if: liveMulticastTestsEnabled,
+            "Set SWIFT_NIO_UDP_ENABLE_LIVE_MULTICAST_TESTS=1 on a multicast-capable host"
+        )
+    )
     func sendToMulticastGroup() async throws {
         let config = multicastConfiguration()
         let transport = NIOUDPTransport(configuration: config)
@@ -75,7 +93,13 @@ struct MulticastTests {
         try await transport.shutdown()
     }
 
-    @Test("Send ByteBuffer to multicast group")
+    @Test(
+        "Send ByteBuffer to multicast group",
+        .enabled(
+            if: liveMulticastTestsEnabled,
+            "Set SWIFT_NIO_UDP_ENABLE_LIVE_MULTICAST_TESTS=1 on a multicast-capable host"
+        )
+    )
     func sendByteBufferToMulticastGroup() async throws {
         let config = multicastConfiguration()
         let transport = NIOUDPTransport(configuration: config)

@@ -11,7 +11,7 @@ A high-performance UDP transport layer built on SwiftNIO with support for unicas
 - **Zero-Copy** - Direct ByteBuffer integration for minimal memory copies
 - **Modern Swift** - Uses Swift 6 concurrency with Mutex and Sendable types
 - **AsyncStream** - Incoming datagrams delivered via AsyncStream with configurable buffering
-- **Comprehensive Testing** - 54 correctness tests covering functionality and error handling
+- **Comprehensive Testing** - 51 environment-independent correctness tests plus 3 opt-in live multicast tests
 
 ## Requirements
 
@@ -361,14 +361,24 @@ the start/shutdown lifecycle and the load-bearing concurrency invariants.
 Performance benchmarks are not counted as tests and do not run during ordinary
 test invocations.
 
-The release gate runs 54 correctness tests across six suites:
+The release gate runs 51 environment-independent correctness tests across six
+suites. Three additional IPv6/send multicast tests are opt-in because hosted
+runners do not expose a multicast route:
+
+```bash
+SWIFT_NIO_UDP_ENABLE_LIVE_MULTICAST_TESTS=1 \
+  TOOLCHAINS=org.swift.64202607231a \
+  xcodebuild test \
+  -scheme swift-nio-udp \
+  -destination 'platform=macOS'
+```
 
 | Suite | Tests | Coverage |
 |-------|-------|----------|
 | Configuration Validation | 10 | Bind addresses, buffer sizes, presets |
 | Error Path | 9 | All error conditions |
 | State Machine | 9 | Lifecycle, concurrency, transitions |
-| Multicast | 9 | Join/leave/send for IPv4 and IPv6 |
+| Multicast | 6 default + 3 live | Join/leave/send for IPv4 and IPv6 |
 | ByteBuffer API | 4 | Zero-copy send/receive |
 | NIOUDPTransport | 13 | Core functionality |
 
